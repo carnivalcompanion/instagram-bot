@@ -8,7 +8,11 @@ const http = require('http');
 
 // Accounts to pull from
 const accounts = [
-  'Carnivalsaintlucia',
+  'carnivalsaintlucia',
+  'Socaleaks',
+  'jabjabofficial',
+  'fuzionmas',
+  'yardmascarnival'
 ];
 
 // Config (moved to env vars for safety)
@@ -37,90 +41,85 @@ const getRandomCaption = () =>
 let allVideos = [];
 let accountsProcessed = 0;
 
-// Fetch videos for a given account (with retry support)
+// Fetch videos for a given account using Instagram Social API
 async function fetchVideos(accountName, retry = false) {
+  const normalizedName = accountName.toLowerCase(); // ✅ Fix case sensitivity
   try {
     const response = await axios.get(
-      `https://instagram-premium-api-2023.p.rapidapi.com/feed/${accountName}`,
+      "https://instagram-social-api.p.rapidapi.com/v1/posts",
       {
         headers: {
-          'X-RapidAPI-Key': rapidApiKey,
-          'X-RapidAPI-Host': 'instagram-premium-api-2023.p.rapidapi.com'
-        }
+          "x-rapidapi-key": rapidApiKey,
+          "x-rapidapi-host": "instagram-social-api.p.rapidapi.com",
+        },
+        params: {
+          username_or_id_or_url: normalizedName,
+        },
       }
     );
 
     const jsonResponse = response.data;
+
+    // Save raw response for debugging
+    fs.writeFileSync(
+      `lastApiResponse-${normalizedName}.json`,
+      JSON.stringify(jsonResponse, null, 2)
+    );
+
     const nowInSeconds = Math.floor(Date.now() / 1000);
     const timeLimit = 23 * 3600 + 45 * 60; // 23h 45m
 
     let videoPostsInfo = [];
 
-    // Try the different API response structures
-    if (
-      jsonResponse.data &&
-      jsonResponse.data.user &&
-      jsonResponse.data.user.edge_owner_to_timeline_media
-    ) {
-      videoPostsInfo = jsonResponse.data.user.edge_owner_to_timeline_media.edges
+    if (jsonResponse && jsonResponse.data && Array.isArray(jsonResponse.data.items)) {
+      videoPostsInfo = jsonResponse.data.items
         .filter(
-          edge =>
-            edge.node.is_video &&
-            nowInSeconds - edge.node.taken_at_timestamp <= timeLimit
+          (item) =>
+            item.media_type === 2 &&
+            item.video_versions &&
+            item.video_versions.length > 0 &&
+            nowInSeconds - item.taken_at <= timeLimit
         )
-        .map(edge => {
+        .map((item) => {
+          const videoUrl = item.video_versions[0]?.url;
           const randomFutureTimeInSeconds = Math.floor(
             Math.random() * postingHours * 3600
           );
           const postTimeUnix = nowInSeconds + randomFutureTimeInSeconds;
           const dateEST = moment
-            .tz(postTimeUnix * 1000, 'America/New_York')
+            .tz(postTimeUnix * 1000, "America/New_York")
             .toDate();
 
           return {
-            taken_at_timestamp: edge.node.taken_at_timestamp,
-            display_url: edge.node.display_url,
-            video_url: edge.node.video_url,
-            owner: edge.node.owner,
-            post_time: postTimeUnix,
-            real_time: dateEST.toISOString()
-          };
-        });
-    } else if (jsonResponse.items) {
-      videoPostsInfo = jsonResponse.items
-        .filter(
-          item => item.is_video && nowInSeconds - item.taken_at <= timeLimit
-        )
-        .map(item => {
-          const randomFutureTimeInSeconds = Math.floor(
-            Math.random() * postingHours * 3600
-          );
-          const postTimeUnix = nowInSeconds + randomFutureTimeInSeconds;
-          const dateEST = moment
-            .tz(postTimeUnix * 1000, 'America/New_York')
-            .toDate();
-
-          return {
+            id: item.id,
             taken_at_timestamp: item.taken_at,
             display_url:
-              item.image_versions2?.candidates?.[0]?.url ||
-              item.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url,
-            video_url: item.video_versions?.[0]?.url,
-            owner: item.user,
+              item.thumbnail_url ||
+              item.image_versions2?.candidates?.[0]?.url,
+            video_url: videoUrl,
+            owner: { username: item.user?.username || normalizedName },
             post_time: postTimeUnix,
-            real_time: dateEST.toISOString()
+            real_time: dateEST.toISOString(),
           };
         });
     }
 
-    allVideos = allVideos.concat(videoPostsInfo);
+    // Filter duplicates
+    const newVideos = videoPostsInfo.filter(
+      (v) => !postedHistory.find((h) => h.id === v.id)
+    );
+    allVideos = allVideos.concat(newVideos);
   } catch (error) {
     if (error.response && error.response.status === 429 && !retry) {
-      console.warn(`⚠️ 429 Too Many Requests for ${accountName}. Retrying in 30s...`);
-      await sleep(30000); // wait 30 seconds
-      return fetchVideos(accountName, true); // retry once
+      console.warn(
+        `⚠️ 429 Too Many Requests for ${normalizedName}. Retrying in 30s...`
+      );
+      await sleep(30000);
+      return fetchVideos(normalizedName, true);
+    } else if (error.response && error.response.status === 404) {
+      console.warn(`⚠️ Skipping ${normalizedName} — not found (404).`);
     } else {
-      console.error(`Error fetching videos for ${accountName}:`, error.message);
+      console.error(`❌ Error fetching videos for ${normalizedName}:`, error.message);
     }
   } finally {
     accountsProcessed++;
@@ -129,6 +128,7 @@ async function fetchVideos(accountName, retry = false) {
     }
   }
 }
+
 
 // Save and schedule all fetched videos
 function saveAndScheduleAllVideos() {

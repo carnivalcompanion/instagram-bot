@@ -1,0 +1,11 @@
+.env
+*.env
+cc.env
+postedHistory.json
+scheduledVideos.json
+lastApiResponse-*.json
+node_modules
+package-lock.json
+.DS_Store
+*.log
+.pm2

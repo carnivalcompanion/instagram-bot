@@ -1,18 +1,17 @@
 {
   "name": "instagram-bot",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "main": "botScript.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node botScript.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "instagram-private-api": "^1.46.1",
-    "moment-timezone": "^0.6.0",
+    "dotenv": "^16.3.1",
+    "axios": "^1.6.7",
+    "instagram-private-api": "^1.45.2",
+    "moment-timezone": "^0.5.43",
     "node-schedule": "^2.1.1",
-    "request-promise": "^4.2.6"
+    "openai": "^4.0.0"
   }
 }
+

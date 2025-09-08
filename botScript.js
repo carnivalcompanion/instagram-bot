@@ -102,12 +102,9 @@ async function login() {
   }
 }
 
-// -------------------- Fetch posts via RapidAPI instagram120 provider --------------------
-// Uses POST https://instagram120.p.rapidapi.com/api/instagram/posts
-// The response structure differs between providers; this function maps to a normalized shape.
-let allVideos = [];
-let accountsProcessed = 0;
-
+// ===============================
+// 📥 Fetch videos via RapidAPI (instagram120 provider)
+// ===============================
 async function fetchVideos(accountName, retry = false) {
   const normalizedName = accountName.toLowerCase().replace(/^\@/, "");
   try {
@@ -125,38 +122,57 @@ async function fetchVideos(accountName, retry = false) {
     );
 
     const jsonResponse = response.data;
-    fs.writeFileSync(`lastApiResponse-${normalizedName}.json`, JSON.stringify(jsonResponse, null, 2));
+
+    // Save raw response for debugging
+    fs.writeFileSync(
+      `lastApiResponse-${normalizedName}.json`,
+      JSON.stringify(jsonResponse, null, 2)
+    );
 
     const nowInSeconds = Math.floor(Date.now() / 1000);
     const timeLimit = 23 * 3600 + 45 * 60; // 23h45m
 
     let videoPostsInfo = [];
 
-    // Many providers return `result` array; adapt if it's different.
-    const items = Array.isArray(jsonResponse.result) ? jsonResponse.result : jsonResponse.items || [];
+    // instagram120 usually returns results under `result`
+    const items = Array.isArray(jsonResponse.result)
+      ? jsonResponse.result
+      : [];
 
-    if (Array.isArray(items)) {
+    if (items.length) {
       videoPostsInfo = items
         .filter((it) => {
-          // Normalized checks — adapt if provider uses different fields
-          const isVideo = it.is_video === true || it.media_type === 2;
-          const hasUrl = !!(it.video_url || it.videoUrl || it.media_url);
-          const taken = it.taken_at_timestamp || it.taken_at || it.taken_at_ts || it.taken_at_time;
-          if (!isVideo || !hasUrl || !taken) return false;
-          // within time window
-          return nowInSeconds - (it.taken_at_timestamp || it.taken_at || it.taken_at_ts || 0) <= timeLimit;
+          const isVideo =
+            it.is_video === true || it.media_type === 2;
+          const hasUrl =
+            !!(it.video_url || it.videoUrl || it.media_url);
+          const taken =
+            it.taken_at_timestamp ||
+            it.taken_at ||
+            Math.floor(Date.now() / 1000);
+          if (!isVideo || !hasUrl) return false;
+          return nowInSeconds - taken <= timeLimit;
         })
         .map((it) => {
-          const videoUrl = it.video_url || it.videoUrl || it.media_url;
-          const takenAt = it.taken_at_timestamp || it.taken_at || it.taken_at_ts || Math.floor(Date.now() / 1000);
-          const randomFuture = Math.floor(Math.random() * postingHours * 3600);
-          const postTimeUnix = Math.floor(Date.now() / 1000) + randomFuture;
-          const dateEST = moment.tz(postTimeUnix * 1000, "America/New_York").toDate();
+          const videoUrl =
+            it.video_url || it.videoUrl || it.media_url;
+          const takenAt =
+            it.taken_at_timestamp ||
+            it.taken_at ||
+            Math.floor(Date.now() / 1000);
+          const randomFuture = Math.floor(
+            Math.random() * postingHours * 3600
+          );
+          const postTimeUnix = nowInSeconds + randomFuture;
+          const dateEST = moment
+            .tz(postTimeUnix * 1000, "America/New_York")
+            .toDate();
 
           return {
             id: it.id || `${normalizedName}_${takenAt}`,
             taken_at_timestamp: takenAt,
-            display_url: it.display_url || it.thumbnail_url || it.thumbnail || null,
+            display_url:
+              it.display_url || it.thumbnail || null,
             video_url: videoUrl,
             owner: { username: normalizedName },
             post_time: postTimeUnix,
@@ -165,8 +181,10 @@ async function fetchVideos(accountName, retry = false) {
         });
     }
 
-    // Filter duplicates using postedHistory
-    const newVideos = videoPostsInfo.filter((v) => !postedHistory.find((h) => h.id === v.id));
+    // Filter duplicates
+    const newVideos = videoPostsInfo.filter(
+      (v) => !postedHistory.find((h) => h.id === v.id)
+    );
     if (newVideos.length) {
       console.log(`➕ Found ${newVideos.length} new video(s) for ${normalizedName}`);
     } else {
@@ -174,10 +192,9 @@ async function fetchVideos(accountName, retry = false) {
     }
     allVideos = allVideos.concat(newVideos);
   } catch (err) {
-    // handle rate limits and other errors
     const status = err?.response?.status;
     if (status === 429 && !retry) {
-      console.warn(`⚠️ 429 for ${normalizedName}. Waiting 30s then retrying...`);
+      console.warn(`⚠️ 429 for ${normalizedName}. Retrying in 30s...`);
       await sleep(30000);
       return fetchVideos(accountName, true);
     } else if (status === 404) {

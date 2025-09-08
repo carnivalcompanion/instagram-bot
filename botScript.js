@@ -8,7 +8,7 @@ const http = require('http');
 
 // Accounts to pull from
 const accounts = [
-  '@socaleaks',
+  'Carnivalsaintlucia',
 ];
 
 // Config (moved to env vars for safety)

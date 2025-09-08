@@ -3,15 +3,14 @@
   "version": "1.0.0",
   "main": "botScript.js",
   "scripts": {
-    "start": "node botScript.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "dotenv": "^16.3.1",
     "axios": "^1.6.7",
+    "dotenv": "^16.3.1",
     "instagram-private-api": "^1.45.2",
     "moment-timezone": "^0.5.43",
     "node-schedule": "^2.1.1",
     "openai": "^4.0.0"
   }
 }
-

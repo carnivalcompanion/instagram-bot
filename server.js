@@ -27,3 +27,15 @@ exec("node botScript.js", (err, stdout, stderr) => {
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
 });
+
+// 🌍 Self-ping to keep Render free tier alive
+const axios = require("axios");
+
+setInterval(() => {
+  axios
+    .get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME || "instagram-bot-ua6x.onrender.com"}`)
+    .then(() => console.log("🔄 Self-ping successful"))
+    .catch((err) => console.error("⚠️ Self-ping failed:", err.message));
+}, 14 * 60 * 1000); // every 14 minutes
+
+

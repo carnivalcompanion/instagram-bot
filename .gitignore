@@ -9,3 +9,4 @@ package-lock.json
 .DS_Store
 *.log
 .pm2
+igSession.json

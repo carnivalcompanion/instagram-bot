@@ -1,38 +1,32 @@
 // External libraries
-const { IgApiClient } = require('instagram-private-api');
-const axios = require('axios');                // replacing deprecated request
-const schedule = require('node-schedule');
-const fs = require('fs');
-const moment = require('moment-timezone');
-const http = require('http');
+const { IgApiClient } = require("instagram-private-api");
+const axios = require("axios");
+const schedule = require("node-schedule");
+const fs = require("fs");
+const moment = require("moment-timezone");
 
 // Accounts to pull from
 const accounts = [
-  'carnivalsaintlucia',
-  'Socaleaks',
-  'jabjabofficial',
-  'fuzionmas',
-  'yardmascarnival'
+  "carnivalsaintlucia",
+  "Socaleaks",
+  "jabjabofficial",
+  "fuzionmas",
+  "yardmascarnival",
 ];
 
-// Config (moved to env vars for safety)
+// Config (from env vars)
 const username = process.env.IG_USERNAME;
 const password = process.env.IG_PASSWORD;
 const rapidApiKey = process.env.RAPIDAPI_KEY;
-
-// Schedule config
-const startHour = 20;   // 8 PM EST
-const startMin = 30;    // 8:30 PM EST
-const postingHours = 6; // hours of posting window
 
 // Instagram client
 const ig = new IgApiClient();
 
 // Captions
 const captions = [
-  'Having fun at the carnival! 😊',
-  'Another great day for adventures! 😊',
-  'Making memories that last forever! 🍹'
+  "Having fun at the carnival! 😊",
+  "Another great day for adventures! 🎉",
+  "Making memories that last forever! 🍹",
 ];
 const getRandomCaption = () =>
   captions[Math.floor(Math.random() * captions.length)];
@@ -41,9 +35,36 @@ const getRandomCaption = () =>
 let allVideos = [];
 let accountsProcessed = 0;
 
-// Fetch videos for a given account using Instagram Social API
+// ===============================
+// 🔑 LOGIN WITH SESSION PERSISTENCE
+// ===============================
+async function login() {
+  ig.state.generateDevice(username);
+
+  if (fs.existsSync("igSession.json")) {
+    try {
+      const savedSession = JSON.parse(fs.readFileSync("igSession.json"));
+      await ig.state.deserialize(savedSession);
+      console.log("✅ Reused saved Instagram session");
+      return;
+    } catch (err) {
+      console.warn("⚠️ Failed to load saved session, logging in fresh...");
+    }
+  }
+
+  // Fresh login
+  await ig.account.login(username, password);
+  const serialized = await ig.state.serialize();
+  delete serialized.constants; // not needed
+  fs.writeFileSync("igSession.json", JSON.stringify(serialized));
+  console.log("🔑 Logged in fresh & saved new session");
+}
+
+// ===============================
+// 📥 Fetch videos via RapidAPI
+// ===============================
 async function fetchVideos(accountName, retry = false) {
-  const normalizedName = accountName.toLowerCase(); // ✅ Fix case sensitivity
+  const normalizedName = accountName.toLowerCase();
   try {
     const response = await axios.get(
       "https://instagram-social-api.p.rapidapi.com/v1/posts",
@@ -52,39 +73,33 @@ async function fetchVideos(accountName, retry = false) {
           "x-rapidapi-key": rapidApiKey,
           "x-rapidapi-host": "instagram-social-api.p.rapidapi.com",
         },
-        params: {
-          username_or_id_or_url: normalizedName,
-        },
+        params: { username_or_id_or_url: normalizedName },
       }
     );
 
     const jsonResponse = response.data;
 
-    // Save raw response for debugging
     fs.writeFileSync(
       `lastApiResponse-${normalizedName}.json`,
       JSON.stringify(jsonResponse, null, 2)
     );
 
     const nowInSeconds = Math.floor(Date.now() / 1000);
-    const timeLimit = 23 * 3600 + 45 * 60; // 23h 45m
+    const timeLimit = 23 * 3600 + 45 * 60; // 23h45m
 
     let videoPostsInfo = [];
 
-    if (jsonResponse && jsonResponse.data && Array.isArray(jsonResponse.data.items)) {
+    if (jsonResponse?.data?.items) {
       videoPostsInfo = jsonResponse.data.items
         .filter(
           (item) =>
             item.media_type === 2 &&
-            item.video_versions &&
-            item.video_versions.length > 0 &&
+            item.video_versions?.length > 0 &&
             nowInSeconds - item.taken_at <= timeLimit
         )
         .map((item) => {
           const videoUrl = item.video_versions[0]?.url;
-          const randomFutureTimeInSeconds = Math.floor(
-            Math.random() * postingHours * 3600
-          );
+          const randomFutureTimeInSeconds = Math.floor(Math.random() * 6 * 3600);
           const postTimeUnix = nowInSeconds + randomFutureTimeInSeconds;
           const dateEST = moment
             .tz(postTimeUnix * 1000, "America/New_York")
@@ -92,10 +107,6 @@ async function fetchVideos(accountName, retry = false) {
 
           return {
             id: item.id,
-            taken_at_timestamp: item.taken_at,
-            display_url:
-              item.thumbnail_url ||
-              item.image_versions2?.candidates?.[0]?.url,
             video_url: videoUrl,
             owner: { username: item.user?.username || normalizedName },
             post_time: postTimeUnix,
@@ -104,19 +115,13 @@ async function fetchVideos(accountName, retry = false) {
         });
     }
 
-    // Filter duplicates
-    const newVideos = videoPostsInfo.filter(
-      (v) => !postedHistory.find((h) => h.id === v.id)
-    );
-    allVideos = allVideos.concat(newVideos);
+    allVideos = allVideos.concat(videoPostsInfo);
   } catch (error) {
-    if (error.response && error.response.status === 429 && !retry) {
-      console.warn(
-        `⚠️ 429 Too Many Requests for ${normalizedName}. Retrying in 30s...`
-      );
+    if (error.response?.status === 429 && !retry) {
+      console.warn(`⚠️ 429 Too Many Requests for ${normalizedName}. Retrying in 30s...`);
       await sleep(30000);
       return fetchVideos(normalizedName, true);
-    } else if (error.response && error.response.status === 404) {
+    } else if (error.response?.status === 404) {
       console.warn(`⚠️ Skipping ${normalizedName} — not found (404).`);
     } else {
       console.error(`❌ Error fetching videos for ${normalizedName}:`, error.message);
@@ -129,38 +134,32 @@ async function fetchVideos(accountName, retry = false) {
   }
 }
 
-
-// Save and schedule all fetched videos
+// ===============================
+// ⏰ Save and schedule posts
+// ===============================
 function saveAndScheduleAllVideos() {
   if (!allVideos.length) {
     console.log("No videos collected — nothing to schedule.");
     return;
   }
 
-  // Sort videos by post_time (earliest first)
   allVideos.sort((a, b) => a.post_time - b.post_time);
-
-  // Save to file (for debugging/record-keeping)
   fs.writeFileSync("scheduledVideos.json", JSON.stringify(allVideos, null, 2));
   console.log(`Saved ${allVideos.length} videos to scheduledVideos.json`);
 
-  // Schedule each post
-  allVideos.forEach(video => {
+  allVideos.forEach((video) => {
     const scheduledDate = new Date(video.post_time * 1000);
 
     schedule.scheduleJob(scheduledDate, async () => {
       try {
-        console.log(`Posting video from ${video.owner?.username || "unknown"} at ${scheduledDate}`);
+        console.log(`📤 Posting video from ${video.owner?.username} at ${scheduledDate}`);
 
-        // Login if not already logged in
-        ig.state.generateDevice(username);
-        await ig.account.login(username, password);
+        await login(); // ensure logged in
 
-        // Upload video
         const videoBuffer = await axios.get(video.video_url, { responseType: "arraybuffer" });
         await ig.publish.video({
           video: Buffer.from(videoBuffer.data),
-          coverFrame: 0, // default cover frame
+          coverFrame: 0,
           caption: getRandomCaption(),
         });
 
@@ -172,21 +171,21 @@ function saveAndScheduleAllVideos() {
   });
 }
 
-// Manual test post function (with local fallback)
+// ===============================
+// 🧪 Manual test post
+// ===============================
 async function testPost() {
   try {
-    console.log("🔑 Logging into Instagram for test post...");
-    ig.state.generateDevice(username);
-    await ig.account.login(username, password);
+    await login();
 
     let videoBuffer;
-
     if (fs.existsSync("test.mp4")) {
-      console.log("🎥 Using local test.mp4 for upload...");
+      console.log("🎥 Using local test.mp4...");
       videoBuffer = fs.readFileSync("test.mp4");
     } else {
-      console.log("🌐 No local file found, downloading sample video...");
-      const testVideoUrl = "https://filesamples.com/samples/video/mp4/sample_640x360.mp4";
+      console.log("🌐 Downloading sample video...");
+      const testVideoUrl =
+        "https://filesamples.com/samples/video/mp4/sample_640x360.mp4";
       const response = await axios.get(testVideoUrl, { responseType: "arraybuffer" });
       videoBuffer = Buffer.from(response.data);
     }
@@ -194,7 +193,7 @@ async function testPost() {
     await ig.publish.video({
       video: videoBuffer,
       coverFrame: 0,
-      caption: "🚀 Test post successful! (Uploaded from test.mp4 or fallback)"
+      caption: "🚀 Test post successful! (session persisted)",
     });
 
     console.log("✅ Test video posted successfully!");
@@ -203,27 +202,28 @@ async function testPost() {
   }
 }
 
-// Helper to delay execution
+// ===============================
+// Helpers
+// ===============================
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Sequentially fetch videos with a delay to avoid 429 errors
 async function fetchAllAccountsSequentially() {
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i];
     console.log(`⏳ Fetching videos for ${acc} (account ${i + 1}/${accounts.length})...`);
     await fetchVideos(acc);
-
-    // wait 10 seconds between requests to reduce 429 errors
-    await sleep(10000);
+    await sleep(10000); // avoid rate limits
   }
 }
 
-// Check command-line args
+// ===============================
+// Entry point
+// ===============================
 if (process.argv.includes("--test")) {
   testPost();
 } else {
-  // Normal run: fetch videos sequentially (avoids 429 errors + retries once on fail)
   fetchAllAccountsSequentially();
 }
+

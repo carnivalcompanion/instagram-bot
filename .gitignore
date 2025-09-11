@@ -12,3 +12,15 @@ postedHistory.json
 temp_*.jpg
 temp_*.mp4
 *.log
+# Mac system files
+.DS_Store
+frontend/.DS_Store
+frontend/src/.DS_Store
+
+# Extra env
+cc.env
+
+# API dumps
+lastApiResponse-*.json
+scheduledVideos.json
+

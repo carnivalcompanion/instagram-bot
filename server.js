@@ -1,41 +1,26 @@
+// server.js
+require("dotenv").config();
 const express = require("express");
-const { exec } = require("child_process");
+const { fetchAllAccountsSequentially } = require("./botScript");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Root route
-app.get("/", (req, res) => {
-  res.send("🚀 Instagram Bot is running!");
+// Basic health check route
+app.get("/status", (req, res) => {
+  res.json({
+    status: "Bot is alive ✅",
+    timestamp: new Date().toISOString(),
+  });
 });
 
-// Keep the bot alive
-setInterval(() => {
-  console.log("⏱️ Bot is alive ping at", new Date().toISOString());
-}, 5 * 60 * 1000);
-
-// Start the bot script automatically
-exec("node botScript.js", (err, stdout, stderr) => {
-  if (err) {
-    console.error("❌ Error running bot:", err);
-    return;
-  }
-  console.log(stdout);
-  if (stderr) console.error(stderr);
-});
-
+// Use port 10000 for backend to avoid clashing with React frontend
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ Backend server running on port ${PORT}`);
+  console.log("🤖 Starting Instagram bot...");
+  
+  // Start the bot
+  fetchAllAccountsSequentially().catch(err => {
+    console.error("❌ Bot failed to start:", err);
+  });
 });
-
-// 🌍 Self-ping to keep Render free tier alive
-const axios = require("axios");
-
-setInterval(() => {
-  axios
-    .get(`https://${process.env.RENDER_EXTERNAL_HOSTNAME || "instagram-bot-ua6x.onrender.com"}`)
-    .then(() => console.log("🔄 Self-ping successful"))
-    .catch((err) => console.error("⚠️ Self-ping failed:", err.message));
-}, 14 * 60 * 1000); // every 14 minutes
-
-

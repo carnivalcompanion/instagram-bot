@@ -1,1007 +1,750 @@
-const express = require('express');
-const keepAliveApp = express();
-const keepAlivePort = process.env.PORT || 3000;
+// -----------------------------------------------------------------------------
+// Instagram Bot — Ultra-Safe Anti-Detection Mode (2-4 posts/day)
+// Videos only from API & local media, with credit to original creators
+// Advanced human-like behavior patterns to avoid detection
+// -----------------------------------------------------------------------------
+// Node: >= 18 (uses built-in fetch), ESM module
+// -----------------------------------------------------------------------------
 
-keepAliveApp.get('/', (req, res) => {
-  res.send('Node.js Bot is alive!');
-});
+import fs from "fs";
+import path from "path";
+import express from "express";
+import dotenv from "dotenv";
+import { IgApiClient } from "instagram-private-api";
+import { fileURLToPath } from "url";
+import ffmpeg from "fluent-ffmpeg";
 
-keepAliveApp.listen(keepAlivePort, () => {
-  console.log(`Keep-alive server running on port ${keepAlivePort}`);
-});
-require("dotenv").config();
+// ----------------------------- Path helpers ----------------------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const { IgApiClient } = require("instagram-private-api");
-const axios = require("axios");
-const schedule = require("node-schedule");
-const fs = require("fs");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const ffmpegPath = require("ffmpeg-static");
+// ----------------------------- .env / config ---------------------------------
+dotenv.config();
 
-// Set FFmpeg path
-ffmpeg.setFfmpegPath(ffmpegPath);
+const USERNAME = process.env.IG_USERNAME;
+const PASSWORD = process.env.IG_PASSWORD;
 
-// Initial logging
-console.log("🚀 Script starting...");
-console.log("Arguments:", process.argv);
+// Optional, comma-separated list. Falls back to defaults if not provided.
+const API_ACCOUNTS =
+  (process.env.API_ACCOUNTS || "aircommittee3,fuzionmas,scorchmag,yardmascarnival")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-// -------------------- Config --------------------
-const accounts = [
-  "aircommittee3",
-  "illusionsmas",
-  "reignmasband",
-  "shineymas",
-  "Livcarnival", 
-  "fantasykarnival",
-  "chocolatenationmas",
-  "tropicalfusionmas",
-  "carnivalsaintlucia",
-  "jabjabofficial",
-  "fuzionmas",
-  "scorchmag",
-  "yardmascarnival",
+// Where to read local media from (MP4/MOV/AVI/MKV - videos only)
+const MEDIA_DIR = path.resolve(process.env.LOCAL_MEDIA_DIR || path.join(__dirname, "localMedia"));
+// Placeholder if API + local fail (should be an image)
+const PLACEHOLDER_IMG = path.resolve(process.env.PLACEHOLDER_IMG || path.join(__dirname, "placeholder.jpg"));
+// Session state (persist login)
+const SESSION_FILE = path.resolve(process.env.SESSION_FILE || path.join(__dirname, "session.json"));
+// Seen post IDs store (so we don't re-use API posts too soon)
+const SEEN_FILE = path.resolve(process.env.SEEN_FILE || path.join(__dirname, "seen.json"));
+
+// Caption defaults
+const DEFAULT_IMMEDIATE_CAPTION =
+  process.env.IMMEDIATE_CAPTION || "🔥 Fresh carnival content!";
+const DEFAULT_SCHEDULED_CAPTION =
+  process.env.SCHEDULED_CAPTION || "🎭 Carnival vibes!";
+
+// Popular carnival and West Indian hashtags (randomly selected)
+const CARNIVAL_HASHTAGS = [
+  "#TrinidadCarnival", "#CaribbeanCarnival", "#CarnivalVibes", "#Masquerade", "#Fete",
+  "#CarnivalLife", "#CarnivalSpirit", "#CarnivalSeason", "#MasBand", "#Costume",
+  "#Steelpan", "#SocaMusic", "#Calypso", "#Dancehall", "#CaribbeanCulture",
+  "#IslandVibes", "#TropicalVibes", "#WestIndianCulture", "#CaribbeanLife", "#IslandLife",
+  "#Carnival2024", "#Carnival2025", "#CarnivalParty", "#RoadMarch", "#Jouvert",
+  "#CarnivalDancer", "#CarnivalCostume", "#Soca", "#CaribbeanMusic", "#TriniCulture",
+  "#WestIndianHeritage", "#CaribbeanHeritage", "#CarnivalTradition", "#Masquerader",
+  "#CarnivalFeathers", "#CarnivalMakeup", "#CarnivalDance", "#SocaParty", "#FeteLife"
 ];
-const username = process.env.IG_USERNAME;
-const password = process.env.IG_PASSWORD;
-const rapidApiKey = process.env.RAPIDAPI_KEY;
 
-// Path to your local media folder (symlinked to iCloud)
-const localMediaDir = path.join(__dirname, "localMedia");
-console.log("Using media directory:", localMediaDir);
+// Ultra-safe posting frequency (2-4 posts per day)
+const POSTS_PER_DAY = () => Math.floor(Math.random() * 3) + 2; // 2-4 random posts
 
-// Placeholder image path
-const placeholderPath = path.join(__dirname, "placeholder.jpg");
+// Extended delays for anti-detection
+const MIN_DELAY_BETWEEN_ACTIONS = 60000; // 1 minute minimum
+const MAX_DELAY_BETWEEN_ACTIONS = 300000; // 5 minutes maximum
 
-// Safety check
-if (!username || !password || !rapidApiKey) {
-  console.error("❌ Missing environment variables. Set IG_USERNAME, IG_PASSWORD, RAPIDAPI_KEY.");
+// Keep-alive HTTP port (Render provides PORT)
+const PORT = Number(process.env.PORT || 3000);
+
+// ------------------------------- Guards --------------------------------------
+if (!USERNAME || !PASSWORD) {
+  console.error("❌ Missing environment variables. Set IG_USERNAME, IG_PASSWORD.");
   process.exit(1);
 }
 
-// Instagram client
+if (!fs.existsSync(MEDIA_DIR)) {
+  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+}
+
+// ------------------------------ Globals --------------------------------------
 const ig = new IgApiClient();
 
-// Captions + hashtags
-const year = new Date().getFullYear();
-const hashtagPool = [
-  `#carnival`,
-  `#soca`,
-  `#caribbean`,
-  `#trinidadcarnival`,
-  `#carnaval`,
-  `#fete`,
-  `#socamusic`,
-  `#carnivalcostume`,
-  `#mas`,
-  `#jouvert`,
-  `#caribbeancarnival`,
-  `#cropover`,
-  `#playmas`,
-  `#jabjab`,
-  `#socavibes`,
-  `#carnivalculture`,
-  `#carnival${year}`,
-  `#soca${year}`,
-];
+let seenState = {
+  lastCleared: Date.now(),
+  ids: [],
+};
+let seenSet = new Set();
 
-// Utility: pick N random unique hashtags
-function getRandomHashtags(n = 5) {
-  const shuffled = [...hashtagPool].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, n).join(" ");
-}
-
-const captionTemplates = [
-  `Having fun at the carnival! 🎉`,
-  `Another great day for soca and music! 🥳`,
-  `Making memories that last forever! 🍹`,
-  `Colors, feathers, and pure freedom! 🪶✨`,
-  `This is how we do carnival in the islands 🌴🔥`,
-  `Soca therapy in full effect! 🎶💃`,
-  `Energy too high to calm down 🚀`,
-  `Every beat of the drum tells a story 🥁❤️`,
-  `Mas is not just a festival, it's a lifestyle 🌟`,
-  `From sunrise to sunset, pure carnival spirit 🌞🌙`,
-  `When the riddim hits, there's no standing still 🎵⚡`,
-  `One love, one people, one carnival 💛💚❤️`,
-  `The road is ours today 🛣️👑`,
-  `Jump, wave, repeat! 🔁🙌`,
-  `Masqueraders bringing the heat 🔥💃`,
-  `The Caribbean heartbeat never stops 💓🌊`,
-  `Carnival in full effect! 🎭🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩🇻🇨`,
-  `From the Caribbean to the world 🌍✨ Mas forever 🇹🇹🇱🇨🇬🇩`,
-  `Flags up! Wave it high and rep your island 🙌🏽🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩`,
-  `Sweet soca, sweet steelpan, sweet culture 🎶🥁🇧🇧🇹🇹🇱🇨`,
-  `Jumpin' with the Caribbean massive 🌴🔥🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩`,
-  `Every island, one carnival spirit 🌊❤️💛💚🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩`,
-  `The road is life 🚶🏾‍♀️🎉🇧🇧🇹🇹🇱🇨🇬🇩🇯🇲`,
-  `Energy from the West Indies can't be matched ⚡🌴🇹🇹🇧🇧🇱🇨🇬🇩`,
-  `Wave something! Rag, flag, or cooler cup 🏳️🥤🔥🇹🇹🇱🇨🇬🇩`,
-  `We limin', we jammin', we reppin' culture 🍹💃🏽🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩`,
-  `Mas is freedom, mas is love ❤️🎭🇹🇹🇱🇨🇬🇩`,
-  `One rhythm, one people, one Caribbean 🌍🎶🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩`
-];
-
-// Caption builder with credit
-function buildCaption(originalUser = null) {
-  const randomText = captionTemplates[Math.floor(Math.random() * captionTemplates.length)];
-  const hashtags = getRandomHashtags();
-
-  // Ensure #CarnivalCompanion is always included once
-  const allTags = `${hashtags} #CarnivalCompanion`
-    .split(" ")
-    .filter((tag, index, self) => tag && self.indexOf(tag) === index) // remove duplicates
-    .join(" ");
-
-  const credit = originalUser ? `\n\n📸 @${originalUser}` : "";
-  
-  return `${randomText}\n\n${allTags}${credit}`;
-}
-
-// -------------------- Persistence --------------------
-const sessionFile = "igSession.json";
-const historyFile = "postedHistory.json";
-let postedHistory = [];
-
-if (fs.existsSync(historyFile)) {
+// ------------------------------ Utilities ------------------------------------
+function loadJSON(filePath, fallback) {
   try {
-    postedHistory = JSON.parse(fs.readFileSync(historyFile, "utf8"));
-  } catch {
-    postedHistory = [];
+    if (fs.existsSync(filePath)) {
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    }
+  } catch (e) {
+    console.warn(`⚠️ Failed to read ${path.basename(filePath)}:`, e.message);
+  }
+  return fallback;
+}
+
+function saveJSON(filePath, obj) {
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn(`⚠️ Failed to write ${path.basename(filePath)}:`, e.message);
   }
 }
 
-// -------------------- Local Media Functions --------------------
-function getRandomLocalMedia() {
-  if (!fs.existsSync(localMediaDir)) {
-    console.log("📁 Local media directory not found");
-    return null;
-  }
-  
-  const files = fs.readdirSync(localMediaDir).filter(f => /\.(jpg|jpeg|png|mp4)$/i.test(f));
-  if (files.length === 0) {
-    console.log("📁 No media files found in local media directory");
-    return null;
-  }
-
-  // Exclude already posted local files
-  const usedFiles = new Set(postedHistory.filter(h => h.source === "local").map(h => h.id));
-  const unused = files.filter(f => !usedFiles.has(f));
-
-  if (unused.length === 0) {
-    console.log("⚠️ All local media already posted, will reuse some");
-    // Reset local media history if all have been used
-    postedHistory = postedHistory.filter(h => h.source !== "local");
-    fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2));
-    return path.join(localMediaDir, files[Math.floor(Math.random() * files.length)]);
-  }
-
-  const chosen = unused[Math.floor(Math.random() * unused.length)];
-  return path.join(localMediaDir, chosen);
+function loadSeen() {
+  seenState = loadJSON(SEEN_FILE, { lastCleared: Date.now(), ids: [] });
+  seenSet = new Set(seenState.ids || []);
 }
 
-// -------------------- Helpers --------------------
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function persistSeen() {
+  seenState.ids = Array.from(seenSet);
+  saveJSON(SEEN_FILE, seenState);
 }
 
-// Function to get video duration
-function getVideoDuration(filePath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) return reject(err);
-      resolve(metadata.format.duration);
-    });
+// Clear every 2 days
+function clearSeenPostsIfNeeded() {
+  const now = Date.now();
+  const TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
+  if (now - (seenState.lastCleared || 0) > TWO_DAYS) {
+    seenSet.clear();
+    seenState.lastCleared = now;
+    persistSeen();
+    console.log("🧹 Cleared seen post IDs (every 2 days)");
+  }
+}
+
+// Friendly time format
+function fmtTime(d) {
+  return d.toLocaleString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour12: true,
   });
 }
 
-// Function to extract a frame from video
-function extractVideoFrame(videoPath, outputPath) {
+function isVideoFile(filename) {
+  return /\.(mp4|mov|avi|mkv|webm)$/i.test(filename);
+}
+
+// Get random hashtags from the carnival list
+function getRandomHashtags(count = 8) {
+  const shuffled = [...CARNIVAL_HASHTAGS].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, count).join(' ');
+}
+
+// Generate caption with credit and hashtags
+function generateCaption(baseCaption, sourceUsername, isApiContent = false) {
+  let caption = baseCaption;
+  
+  // Add credit for API content
+  if (isApiContent && sourceUsername) {
+    caption += `\n\n🎥 Credit: @${sourceUsername}`;
+    caption += `\n📌 Follow for daily carnival content!`;
+  } else {
+    caption += `\n\n📌 Follow @${USERNAME} for daily carnival content!`;
+  }
+  
+  // Add mandatory CarnivalCompanion hashtag and random carnival hashtags
+  caption += `\n\n#CarnivalCompanion ${getRandomHashtags(8)}`;
+  
+  return caption;
+}
+
+// Enhanced caption variation to avoid pattern detection
+function varyCaptionAdvanced(baseCaption, sourceUsername) {
+  const emotionVariations = [
+    { prefix: "Loving the energy in this! ", emoji: "🔥" },
+    { prefix: "The vibes are incredible! ", emoji: "💃" },
+    { prefix: "This made my day! ", emoji: "✨" },
+    { prefix: "Can't get enough of this! ", emoji: "🎭" },
+    { prefix: "The culture is beautiful! ", emoji: "🌟" },
+    { prefix: "", emoji: "📸" }, // No prefix sometimes
+    { prefix: "Wow! ", emoji: "🎉" },
+    { prefix: "Incredible moment! ", emoji: "🙌" }
+  ];
+  
+  const variation = emotionVariations[Math.floor(Math.random() * emotionVariations.length)];
+  
+  let newCaption = baseCaption;
+  
+  // 60% chance to add emotional prefix
+  if (Math.random() < 0.6) {
+    newCaption = variation.prefix + newCaption;
+  }
+  
+  // Always use random emoji
+  newCaption = variation.emoji + " " + newCaption;
+  
+  // Occasionally add location context (30% chance)
+  if (Math.random() < 0.3) {
+    const locations = ["Trinidad", "Caribbean", "West Indies", "Island Life"];
+    const location = locations[Math.floor(Math.random() * locations.length)];
+    newCaption += ` ${location} vibes!`;
+  }
+  
+  return generateCaption(newCaption, sourceUsername, sourceUsername !== null);
+}
+
+// Random delay function for anti-detection
+async function randomDelay(minMs = MIN_DELAY_BETWEEN_ACTIONS, maxMs = MAX_DELAY_BETWEEN_ACTIONS) {
+  const delayMs = Math.random() * (maxMs - minMs) + minMs;
+  console.log(`⏳ Delaying for ${Math.round(delayMs/1000)} seconds...`);
+  await new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+// Extract thumbnail from video using ffmpeg
+function extractVideoThumbnail(videoPath, thumbnailPath) {
   return new Promise((resolve, reject) => {
     ffmpeg(videoPath)
       .screenshots({
-        timestamps: ["00:00:01"], // 1 second in to avoid black frames
-        filename: path.basename(outputPath),
-        folder: path.dirname(outputPath),
-        size: '720x1280' // Instagram-friendly size
+        timestamps: ['00:00:01'], // Capture at 1 second
+        filename: path.basename(thumbnailPath),
+        folder: path.dirname(thumbnailPath),
+        size: '640x640'
       })
       .on('end', () => {
-        console.log('✅ Frame extracted successfully');
-        resolve(outputPath);
+        console.log(`✅ Thumbnail extracted: ${path.basename(thumbnailPath)}`);
+        resolve(thumbnailPath);
       })
       .on('error', (err) => {
-        console.error('❌ Error extracting frame:', err);
+        console.error(`❌ Failed to extract thumbnail from ${path.basename(videoPath)}:`, err.message);
         reject(err);
       });
   });
 }
 
-// Function to decide whether to use logo or video frame
-function shouldUseLogo() {
-  // 10% chance to use logo
-  return Math.random() < 0.1;
-}
-
-async function login() {
-  ig.state.generateDevice(username);
-
-  if (fs.existsSync(sessionFile)) {
-    try {
-      await ig.state.deserialize(JSON.parse(fs.readFileSync(sessionFile)));
-      console.log("✅ Reused saved Instagram session");
-      return;
-    } catch {
-      console.warn("⚠️ Failed to load saved session, logging in fresh...");
-    }
-  }
-
-  console.log("🔑 Logging in fresh...");
-  await ig.account.login(username, password);
-  const serialized = await ig.state.serialize();
-  delete serialized.constants;
-  fs.writeFileSync(sessionFile, JSON.stringify(serialized, null, 2));
-  console.log("🔒 New session saved");
-}
-
-// Add this function to refresh the Instagram session
-async function refreshSession() {
-  try {
-    await ig.state.reset();
-    await login();
-    console.log("✅ Instagram session refreshed");
-  } catch (err) {
-    console.error("❌ Failed to refresh session:", err.message);
-  }
-}
-
-// -------------------- Media Fetch Helper --------------------
-async function fetchMediaFromAccount(account, preferredType = null) {
-  try {
-    const normalizedName = account.toLowerCase().replace(/^\@/, "");
-    const response = await axios.get(
-      `https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${normalizedName}`,
-      {
-        headers: {
-          "x-rapidapi-key": rapidApiKey,
-          "x-rapidapi-host": "instagram-social-api.p.rapidapi.com",
-        },
-        timeout: 20000,
+// Get video duration
+function getVideoDuration(videoPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(videoPath, (err, metadata) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(metadata.format.duration);
       }
-    );
+    });
+  });
+}
 
-    // Normalize items structure
+// Trim video to maximum duration
+function trimVideo(inputPath, outputPath, maxDuration) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .setDuration(maxDuration)
+      .output(outputPath)
+      .on('end', () => {
+        console.log(`✅ Video trimmed to ${maxDuration}s: ${path.basename(outputPath)}`);
+        resolve(outputPath);
+      })
+      .on('error', (err) => {
+        console.error(`❌ Failed to trim video:`, err.message);
+        reject(err);
+      })
+      .run();
+  });
+}
+
+// ------------------------------ Instagram login ------------------------------
+async function saveSession() {
+  const serialized = await ig.state.serialize();
+  delete serialized.constants; // remove circular refs
+  saveJSON(SESSION_FILE, serialized);
+  console.log("🔒 Session saved");
+}
+
+async function loadSession() {
+  if (fs.existsSync(SESSION_FILE)) {
+    const state = loadJSON(SESSION_FILE, null);
+    if (state) {
+      await ig.state.deserialize(state);
+      console.log("🔑 Session loaded from file");
+      return true;
+    }
+  }
+  return false;
+}
+
+async function ultraSafeLogin() {
+  console.log("🔐 Ultra-safe login sequence initiated...");
+  
+  // Extended random delay before login (3-8 minutes)
+  const initialDelay = Math.random() * 300000 + 180000;
+  console.log(`⏳ Delaying login for ${Math.round(initialDelay/1000)} seconds...`);
+  await new Promise(resolve => setTimeout(resolve, initialDelay));
+  
+  ig.state.generateDevice(USERNAME);
+  
+  if (await loadSession()) {
+    try {
+      // Verify session with timeout
+      await Promise.race([
+        ig.account.currentUser(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 30000))
+      ]);
+      console.log("🔑 Session verified successfully");
+      return;
+    } catch (e) {
+      console.log("🔄 Session expired or invalid, re-logging in...");
+    }
+  }
+
+  // Additional delay before fresh login
+  await randomDelay(60000, 120000);
+  
+  console.log("🔑 Performing fresh login...");
+  await ig.account.login(USERNAME, PASSWORD);
+  await saveSession();
+  
+  // Extended delay after login (2-5 minutes)
+  await randomDelay(120000, 300000);
+  
+  console.log("🔓 Login sequence completed safely");
+}
+
+// ------------------------------ Direct Instagram API fetch -------------------
+async function fetchUserVideosDirectly(username) {
+  try {
+    console.log(`🔍 Fetching videos directly from @${username}...`);
+    
+    // Get user ID from username
+    const userId = await ig.user.getIdByUsername(username);
+    const userFeed = ig.feed.user(userId);
+    
     let items = [];
-    if (Array.isArray(response.data?.data?.items)) {
-      items = response.data.data.items;
-    } else if (Array.isArray(response.data?.items)) {
-      items = response.data.items;
-    } else if (Array.isArray(response.data)) {
-      items = response.data;
+    let hasMore = true;
+    let attempt = 0;
+    
+    // Get up to 20 posts (multiple pages if needed)
+    while (hasMore && items.length < 20 && attempt < 3) {
+      attempt++;
+      try {
+        const page = await userFeed.items();
+        items.push(...page);
+        
+        if (page.length === 0) {
+          hasMore = false;
+        }
+        
+        // Anti-detection delay between page requests
+        await randomDelay(2000, 5000);
+      } catch (error) {
+        console.error(`❌ Error fetching page ${attempt} for @${username}:`, error.message);
+        hasMore = false;
+      }
+    }
+    
+    console.log(`📊 Found ${items.length} posts from @${username}`);
+    
+    // Filter for videos only
+    const videoItems = items.filter(item => {
+      const isVideo = item?.video_codec && item?.video_versions?.length > 0;
+      const notSeen = !seenSet.has(item.id);
+      return isVideo && notSeen;
+    });
+    
+    console.log(`📹 ${username}: ${videoItems.length} new video(s)`);
+    
+    return videoItems.map(item => ({
+      id: item.id,
+      url: item.video_versions[0]?.url, // Get highest quality video
+      is_video: true,
+      caption: item.caption?.text || '',
+      username: username // Store the source username for credit
+    }));
+    
+  } catch (error) {
+    console.error(`❌ Failed to fetch videos from @${username}:`, error.message);
+    return [];
+  }
+}
+
+// ------------------------------ Media helpers --------------------------------
+async function downloadApiMedia(url, filepath) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Bad response ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+
+    if (!buf || buf.length < 2048) {
+      throw new Error(`Downloaded file too small (${buf?.length || 0} bytes) from ${url}`);
     }
 
-    if (!items.length) {
-      console.warn(`⚠️ No posts found for @${account}`);
-      return null;
-    }
-
-    // Prefer type (video=2, image=1), otherwise fallback to first item
-    let post = items.find(p => preferredType ? p.media_type === preferredType : true);
-    if (!post) post = items[0];
-
-    // Extract media URL
-    let mediaUrl = null;
-    if (post.media_type === 2) {
-      mediaUrl = post.video_versions?.[0]?.url ||
-                 post.videos?.[0]?.url ||
-                 post.carousel_media?.[0]?.video_versions?.[0]?.url;
-    } else if (post.media_type === 1 || post.media_type === 8) {
-      mediaUrl = post.image_versions2?.candidates?.[0]?.url ||
-                 post.images?.standard_resolution?.url ||
-                 post.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
-    }
-
-    if (!mediaUrl) {
-      console.warn(`⚠️ Could not find media URL for @${account}`);
-      return null;
-    }
-
-    return { post, mediaUrl };
+    await fs.promises.writeFile(filepath, buf);
+    return filepath;
   } catch (err) {
-    console.error(`❌ Error fetching posts for @${account}:`, err.message);
+    console.error("❌ Failed to download API media:", err.message);
     return null;
   }
 }
 
-// -------------------- Fetch posts via RapidAPI --------------------
-let allPosts = [];
-let accountsProcessed = 0;
+function findLocalVideos() {
+  if (!fs.existsSync(MEDIA_DIR)) {
+    console.log("Media directory does not exist:", MEDIA_DIR);
+    return [];
+  }
+  
+  const files = fs.readdirSync(MEDIA_DIR);
+  const videoFiles = files.filter((f) => isVideoFile(f));
+  
+  console.log(`Found ${videoFiles.length} local video files:`, videoFiles);
+  return videoFiles.map((f) => ({
+    path: path.join(MEDIA_DIR, f),
+    is_video: true
+  }));
+}
 
-async function fetchPosts(accountName, retry = false) {
-  const normalizedName = accountName.toLowerCase().replace(/^\@/, "");
+// Process video for Instagram (trim if needed)
+async function processVideoForInstagram(videoPath) {
   try {
-    const response = await axios.get(
-      `https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${normalizedName}`,
-      {
-        headers: {
-          "x-rapidapi-key": rapidApiKey,
-          "x-rapidapi-host": "instagram-social-api.p.rapidapi.com",
-        },
-        timeout: 20000,
-      }
-    );
-
-    console.log(`📊 API response for @${accountName}:`, {
-      status: response.status,
-      dataKeys: Object.keys(response.data || {})
-    });
-
-    // Handle different possible response structures
-    let items = [];
-    if (Array.isArray(response.data?.data?.items)) {
-      items = response.data.data.items;
-    } else if (Array.isArray(response.data?.items)) {
-      items = response.data.items;
-    } else if (Array.isArray(response.data)) {
-      items = response.data;
-    }
-
-    console.log(`📊 Found ${items.length} items for @${accountName}`);
+    const duration = await getVideoDuration(videoPath);
+    console.log(`📏 Video duration: ${duration.toFixed(2)} seconds`);
     
-    const now = Math.floor(Date.now() / 1000);
-    const cutoff = 6 * 3600; // 6 hours in seconds
+    // Instagram feed videos must be between 3-60 seconds
+    if (duration > 60) {
+      console.log(`✂️ Trimming video to 60 seconds for Instagram feed...`);
+      const trimmedPath = path.join(__dirname, `temp_trimmed_${Date.now()}.mp4`);
+      await trimVideo(videoPath, trimmedPath, 60);
+      return { path: trimmedPath, isTrimmed: true, originalDuration: duration };
+    }
+    
+    return { path: videoPath, isTrimmed: false, originalDuration: duration };
+  } catch (error) {
+    console.error("❌ Failed to process video:", error.message);
+    return { path: videoPath, isTrimmed: false, originalDuration: null };
+  }
+}
 
-    // Filter posts from the last 6 hours and not in history
-    const recentPosts = items.filter(post => {
-      const postTime = post.taken_at || post.timestamp;
-      const isRecent = (now - postTime) < cutoff;
-      
-      // More comprehensive check for already posted content
-      const isNew = !postedHistory.some(history => {
-        // Check by ID first
-        if (history.id === post.id) return true;
-        
-        // Also check by username and timestamp for additional protection
-        if (history.username === post.user?.username && 
-            Math.abs(history.timestamp - postTime * 1000) < 60000) {
-          return true;
-        }
-        
-        return false;
+// ------------------------------ Posting --------------------------------------
+async function publishPhoto(filePath, caption) {
+  const fileBuf = await fs.promises.readFile(filePath);
+  const res = await ig.publish.photo({ file: fileBuf, caption });
+  try {
+    const code = res?.media?.code;
+    if (code) console.log(`✅ Photo posted: https://instagram.com/p/${code}`);
+    else console.log("✅ Photo posted");
+  } catch {
+    console.log("✅ Photo posted");
+  }
+}
+
+async function publishVideo(videoPath, caption) {
+  // Process video first (trim if needed)
+  const processed = await processVideoForInstagram(videoPath);
+  const finalVideoPath = processed.path;
+  
+  const videoBuffer = await fs.promises.readFile(finalVideoPath);
+  
+  // Extract thumbnail from the video
+  const thumbnailPath = path.join(__dirname, 'temp_thumbnail.jpg');
+  
+  try {
+    await extractVideoThumbnail(finalVideoPath, thumbnailPath);
+    const thumbnailBuffer = await fs.promises.readFile(thumbnailPath);
+    
+    const res = await ig.publish.video({
+      video: videoBuffer,
+      coverImage: thumbnailBuffer,
+      caption: caption
+    });
+    
+    try {
+      const code = res?.media?.code;
+      if (code) console.log(`✅ Video posted: https://instagram.com/p/${code}`);
+      else console.log("✅ Video posted");
+    } catch {
+      console.log("✅ Video posted");
+    }
+  } catch (err) {
+    console.error("❌ Failed to process video, falling back to placeholder thumbnail");
+    
+    // Fallback: use placeholder image as thumbnail
+    if (fs.existsSync(PLACEHOLDER_IMG)) {
+      const thumbnailBuffer = await fs.promises.readFile(PLACEHOLDER_IMG);
+      const res = await ig.publish.video({
+        video: videoBuffer,
+        coverImage: thumbnailBuffer,
+        caption: caption
       });
-      
-      return isRecent && isNew;
-    });
-
-    // Add to allPosts array
-    allPosts = allPosts.concat(recentPosts);
-    accountsProcessed++;
-
-    console.log(`✅ Found ${recentPosts.length} new posts from @${accountName}`);
-  } catch (err) {
-    console.error(`❌ Error fetching posts for @${accountName}:`, err.message);
-    if (err.response) {
-      console.error("Response status:", err.response.status);
-      console.error("Response data:", err.response.data);
-    }
-    if (!retry) {
-      console.log("🔄 Retrying in 10 seconds...");
-      await sleep(10000);
-      return fetchPosts(accountName, true);
-    }
-  }
-}
-
-async function postPlaceholder() {
-  // Try local media first
-  const localFile = getRandomLocalMedia();
-  if (localFile) {
-    console.log("📂 Using local media instead of placeholder:", localFile);
-    try {
-      await login();
-      
-      if (localFile.endsWith(".mp4")) {
-        // Check video duration
-        try {
-          const duration = await getVideoDuration(localFile);
-          if (duration < 3 || duration > 60) {
-            console.warn(`⚠️ Skipping invalid video (duration: ${duration}s)`);
-            // Try another local file
-            const nextFile = getRandomLocalMedia();
-            if (nextFile && nextFile !== localFile) {
-              console.log("🔄 Trying another local media instead...");
-              return postPlaceholder(); // Recursively try again
-            } else {
-              console.log("⚠️ No more valid local videos, using placeholder...");
-              // Fall through to placeholder
-            }
-          }
-        } catch (err) {
-          console.error("❌ Error checking video duration:", err.message);
-          // Fall through to placeholder
-        }
-        
-        let coverPath = placeholderPath;
-        try {
-          const tempFramePath = path.join(__dirname, "temp_frame_local.jpg");
-          await extractVideoFrame(localFile, tempFramePath);
-          coverPath = tempFramePath;
-        } catch (err) {
-          console.error("⚠️ Failed to grab video frame, using logo");
-        }
-
-        await ig.publish.video({
-          video: fs.readFileSync(localFile),
-          coverImage: fs.readFileSync(coverPath),
-          caption: buildCaption(),
-        });
-      } else {
-        await ig.publish.photo({
-          file: fs.readFileSync(localFile),
-          caption: buildCaption(),
-        });
-      }
-      
-      console.log("✅ Local media posted instead of placeholder!");
-      return;
-    } catch (err) {
-      console.error("❌ Failed to post local media:", err.message);
-      // Fall through to placeholder
-    }
-  }
-
-  // Only use placeholder if no local media available
-  if (!fs.existsSync(placeholderPath)) {
-    console.error("❌ Placeholder image missing!");
-    return;
-  }
-
-  try {
-    await login();
-    const buffer = fs.readFileSync(placeholderPath);
-    
-    await ig.publish.photo({
-      file: buffer,
-      caption: buildCaption(),
-    });
-    console.log("✅ Placeholder image posted");
-  } catch (err) {
-    console.error("❌ Failed to post placeholder:", err.message);
-  }
-}
-
-// -------------------- Schedule & Post --------------------
-// Peak engagement times (in 24-hour format)
-const PEAK_HOURS = [
-  { start: 9, end: 11 },   // Morning peak
-  { start: 13, end: 15 },  // Afternoon peak
-  { start: 19, end: 21 }   // Evening peak
-];
-
-// Total posts per day (increased from 6 to 8-10)
-const MIN_POSTS_PER_DAY = 8;
-const MAX_POSTS_PER_DAY = 10;
-
-// Helper function to get random time within peak hours
-function getRandomPeakTime() {
-  const peakSlot = PEAK_HOURS[Math.floor(Math.random() * PEAK_HOURS.length)];
-  const hour = peakSlot.start + Math.floor(Math.random() * (peakSlot.end - peakSlot.start));
-  const minute = Math.floor(Math.random() * 60);
-  
-  const now = new Date();
-  const scheduledDate = new Date(now);
-  scheduledDate.setHours(hour, minute, 0, 0);
-  
-  // If the time has already passed today, schedule for tomorrow
-  if (scheduledDate < now) {
-    scheduledDate.setDate(scheduledDate.getDate() + 1);
-  }
-  
-  return scheduledDate;
-}
-
-// Helper function to get random time during non-peak hours (but still within 6am-10pm)
-function getRandomOffPeakTime() {
-  const hour = 6 + Math.floor(Math.random() * 16); // 6am to 10pm
-  const minute = Math.floor(Math.random() * 60);
-  
-  const now = new Date();
-  const scheduledDate = new Date(now);
-  scheduledDate.setHours(hour, minute, 0, 0);
-  
-  // If the time has already passed today, schedule for tomorrow
-  if (scheduledDate < now) {
-    scheduledDate.setDate(scheduledDate.getDate() + 1);
-  }
-  
-  return scheduledDate;
-}
-
-// Helper function to check if a time is within peak hours
-function isPeakTime(date) {
-  const hour = date.getHours();
-  return PEAK_HOURS.some(peak => hour >= peak.start && hour < peak.end);
-}
-
-// Helper function to schedule a local media post
-function scheduleLocalMediaPost(localFile, scheduledDate) {
-  schedule.scheduleJob(scheduledDate, async () => {
-    let tempFramePath = null;
-    
-    try {
-      await refreshSession();
-
-      if (localFile.endsWith(".mp4")) {
-        // Check video duration
-        try {
-          const duration = await getVideoDuration(localFile);
-          if (duration < 3 || duration > 60) {
-            console.warn(`⚠️ Skipping invalid video (duration: ${duration}s)`);
-            // Try another local file
-            const nextFile = getRandomLocalMedia();
-            if (nextFile && nextFile !== localFile) {
-              console.log("🔄 Trying another local media instead...");
-              return scheduleLocalMediaPost(nextFile, scheduledDate);
-            } else {
-              console.log("⚠️ No more valid local videos, skipping...");
-              return;
-            }
-          }
-        } catch (err) {
-          console.error("❌ Error checking video duration:", err.message);
-          return;
-        }
-        
-        // Extract frame or use logo
-        let coverPath = placeholderPath;
-        try {
-          tempFramePath = path.join(__dirname, "temp_frame_local.jpg");
-          await extractVideoFrame(localFile, tempFramePath);
-          coverPath = tempFramePath;
-          console.log("🎬 Using video frame as cover image");
-        } catch (err) {
-          console.error("⚠️ Failed to grab video frame, using logo");
-        }
-
-        await ig.publish.video({
-          video: fs.readFileSync(localFile),
-          coverImage: fs.readFileSync(coverPath),
-          caption: buildCaption(),
-        });
-        console.log("✅ Local video posted!");
-      } else {
-        await ig.publish.photo({
-          file: fs.readFileSync(localFile),
-          caption: buildCaption(),
-        });
-        console.log("✅ Local photo posted!");
-      }
-
-      // Save to history
-      const historyItem = { 
-        id: path.basename(localFile),
-        timestamp: Date.now(),
-        username: "local",
-        media_type: localFile.endsWith(".mp4") ? 2 : 1,
-        success: true,
-        source: "local"
-      };
-
-      postedHistory.push(historyItem);
-
-      // Keep only the most recent 1000 items to prevent the file from growing too large
-      if (postedHistory.length > 1000) {
-        postedHistory = postedHistory.slice(-1000);
-      }
-
-      fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2));
-
-    } catch (err) {
-      console.error("❌ Error posting local media:", err.message);
-      await postPlaceholder();
-    } finally {
-      // Clean up temporary files
-      if (tempFramePath && fs.existsSync(tempFramePath)) {
-        fs.unlinkSync(tempFramePath);
-        console.log("🧹 Cleaned up temporary frame file");
-      }
-    }
-  });
-}
-
-// Helper function to schedule an API-sourced post
-function scheduleApiPost(post, scheduledDate) {
-  schedule.scheduleJob(scheduledDate, async () => {
-    let tempVideoPath = null;
-    let tempFramePath = null;
-    
-    try {
-      await refreshSession();
-      const account = post.user?.username;
-
-      const fetched = await fetchMediaFromAccount(account, post.media_type);
-      if (!fetched) {
-        console.log("⚠️ No valid media found, posting placeholder...");
-        await postPlaceholder();
-        return;
-      }
-
-      const { post: freshPost, mediaUrl } = fetched;
-
-      if (freshPost.media_type === 2) {
-        console.log(`📤 Posting video from @${account}`);
-        
-        // Download video
-        const res = await axios.get(mediaUrl, { 
-          responseType: "arraybuffer",
-          timeout: 30000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Referer': 'https://www.instagram.com/',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Sec-Fetch-Mode': 'no-cors'
-          }
-        });
-        
-        // Save video to temporary file
-        tempVideoPath = path.join(__dirname, "temp_video.mp4");
-        fs.writeFileSync(tempVideoPath, res.data);
-        
-        // Check video duration
-        try {
-          const duration = await getVideoDuration(tempVideoPath);
-          if (duration < 3 || duration > 60) {
-            console.warn(`⚠️ Skipping API video (duration: ${duration}s)`);
-            return; // Skip this post
-          }
-        } catch (err) {
-          console.error("❌ Error checking video duration:", err.message);
-          return; // Skip this post
-        }
-        
-        try {
-          // Decide whether to use logo or video frame
-          let coverImagePath = placeholderPath;
-          
-          if (!shouldUseLogo()) {
-            try {
-              tempFramePath = path.join(__dirname, "temp_frame.jpg");
-              await extractVideoFrame(tempVideoPath, tempFramePath);
-              coverImagePath = tempFramePath;
-              console.log("🎬 Using video frame as cover image");
-            } catch (frameErr) {
-              console.error("❌ Failed to extract frame, using logo instead:", frameErr.message);
-              coverImagePath = placeholderPath;
-            }
-          } else {
-            console.log("🎲 Using logo as cover image (10% chance)");
-          }
-          
-          // Post video
-          const publishResult = await ig.publish.video({
-            video: fs.readFileSync(tempVideoPath),
-            coverImage: fs.readFileSync(coverImagePath),
-            caption: buildCaption(account),
-          });
-          
-          console.log("✅ Video posted successfully!", publishResult);
-        } catch (videoErr) {
-          console.error("❌ Video posting failed:", videoErr.message);
-          
-          // Try fallback to image
-          console.log("🔄 Trying to post as image instead...");
-          try {
-            await ig.publish.photo({
-              file: fs.readFileSync(placeholderPath),
-              caption: buildCaption(account),
-            });
-            console.log("✅ Fallback image posted successfully!");
-          } catch (imageErr) {
-            console.error("❌ Fallback image posting failed:", imageErr.message);
-            throw imageErr;
-          }
-        }
-      } else {
-        console.log(`📤 Posting image from @${account}`);
-        
-        // Download image
-        const res = await axios.get(mediaUrl, { 
-          responseType: "arraybuffer",
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-          }
-        });
-        
-        await ig.publish.photo({
-          file: Buffer.from(res.data),
-          caption: buildCaption(account),
-        });
-        console.log("✅ Image posted successfully!");
-      }
-
-      // Enhanced history tracking
-      const historyItem = { 
-        id: freshPost.id, 
-        timestamp: Date.now(),
-        username: account,
-        media_type: freshPost.media_type,
-        success: true,
-        source: "api"
-      };
-
-      postedHistory.push(historyItem);
-
-      // Keep only the most recent 1000 items to prevent the file from growing too large
-      if (postedHistory.length > 1000) {
-        postedHistory = postedHistory.slice(-1000);
-      }
-
-      fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2));
-
-      console.log("✅ Post successful!");
-    } catch (err) {
-      console.error("❌ Error posting:", err.message);
-      await postPlaceholder();
-    } finally {
-      // Clean up temporary files
-      if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-        fs.unlinkSync(tempVideoPath);
-        console.log("🧹 Cleaned up temporary video file");
-      }
-      if (tempFramePath && fs.existsSync(tempFramePath)) {
-        fs.unlinkSync(tempFramePath);
-        console.log("🧹 Cleaned up temporary frame file");
-      }
-    }
-  });
-}
-
-function schedulePosts() {
-  const totalPosts = Math.floor(Math.random() * (MAX_POSTS_PER_DAY - MIN_POSTS_PER_DAY + 1)) + MIN_POSTS_PER_DAY;
-  console.log(`📅 Scheduling ${totalPosts} posts for today`);
-  
-  // First, post immediately for confirmation
-  const localFile = getRandomLocalMedia();
-  if (localFile) {
-    console.log("⚡ Posting local media immediately for confirmation...");
-    scheduleLocalMediaPost(localFile, new Date());
-  } else if (allPosts.length > 0) {
-    const firstPost = allPosts[0];
-    console.log("⚡ Posting API content immediately for confirmation...");
-    scheduleApiPost(firstPost, new Date());
-  } else {
-    console.log("⚠️ No content found, posting placeholder...");
-    postPlaceholder();
-    return;
-  }
-
-  // Schedule remaining posts with priority to peak hours
-  const postsToSchedule = totalPosts - 1;
-  const availableApiPosts = allPosts.length - 1;
-  const availableLocalPosts = Math.max(0, postsToSchedule - availableApiPosts);
-  
-  let apiPostsScheduled = 0;
-  let localPostsScheduled = 0;
-  
-  // Schedule API posts first (preferred content)
-  for (let i = 0; i < Math.min(availableApiPosts, postsToSchedule); i++) {
-    const post = allPosts[i + 1];
-    
-    // 70% chance to schedule during peak hours for API content
-    const scheduledDate = Math.random() < 0.7 ? getRandomPeakTime() : getRandomOffPeakTime();
-    
-    console.log(`📅 Scheduled API post ${i+2}/${totalPosts} for ${scheduledDate.toLocaleString()} ${isPeakTime(scheduledDate) ? '⏰(PEAK)' : ''}`);
-    scheduleApiPost(post, scheduledDate);
-    apiPostsScheduled++;
-  }
-  
-  // Schedule local media posts for remaining slots
-  for (let i = 0; i < availableLocalPosts; i++) {
-    const localFile = getRandomLocalMedia();
-    if (localFile) {
-      // 50% chance to schedule during peak hours for local content
-      const scheduledDate = Math.random() < 0.5 ? getRandomPeakTime() : getRandomOffPeakTime();
-      
-      console.log(`📅 Scheduled local media post ${apiPostsScheduled + i + 2}/${totalPosts} for ${scheduledDate.toLocaleString()} ${isPeakTime(scheduledDate) ? '⏰(PEAK)' : ''}`);
-      scheduleLocalMediaPost(localFile, scheduledDate);
-      localPostsScheduled++;
+      console.log("✅ Video posted with placeholder thumbnail");
     } else {
-      console.log("⚠️ Not enough local media for additional posts");
-      break;
+      throw new Error("No thumbnail available for video");
+    }
+  } finally {
+    // Clean up temporary files
+    if (fs.existsSync(thumbnailPath)) {
+      fs.unlinkSync(thumbnailPath);
+    }
+    if (processed.isTrimmed && fs.existsSync(finalVideoPath)) {
+      fs.unlinkSync(finalVideoPath);
     }
   }
+}
+
+async function publishMedia(filePath, caption, isVideo = false) {
+  if (isVideo) {
+    await publishVideo(filePath, caption);
+  } else {
+    await publishPhoto(filePath, caption);
+  }
+}
+
+// ------------------------------ Ultra-Safe Scheduling ------------------------------
+function generateHumanLikeSchedule() {
+  const totalPosts = POSTS_PER_DAY();
+  const schedules = [];
   
-  // If we still need more posts, reuse some content (with different timing)
-  const remainingPosts = totalPosts - 1 - apiPostsScheduled - localPostsScheduled;
-  if (remainingPosts > 0) {
-    console.log(`🔄 Reusing ${remainingPosts} posts with different timing`);
+  console.log(`🎯 Generating ${totalPosts} posts for today (anti-detection mode)`);
+  
+  // Spread posts across a 14-hour active period (8 AM - 10 PM)
+  const activeStartHour = 8;
+  const activeEndHour = 22;
+  const activeWindowMs = (activeEndHour - activeStartHour) * 60 * 60 * 1000;
+  
+  // Divide the active window into segments for better distribution
+  const segments = [];
+  for (let i = 0; i < totalPosts; i++) {
+    const segmentStart = (i / totalPosts) * activeWindowMs;
+    const segmentEnd = ((i + 1) / totalPosts) * activeWindowMs;
+    segments.push([segmentStart, segmentEnd]);
+  }
+  
+  segments.forEach(([segmentStart, segmentEnd], index) => {
+    // Random position within segment
+    const randomOffset = Math.random() * (segmentEnd - segmentStart);
+    const postTimeMs = segmentStart + randomOffset;
     
-    // Reuse some API posts with different scheduling
-    const reuseCount = Math.min(remainingPosts, allPosts.length - 1);
-    for (let i = 0; i < reuseCount; i++) {
-      const post = allPosts[(i + apiPostsScheduled + 1) % allPosts.length];
-      const scheduledDate = getRandomOffPeakTime(); // Always off-peak for reused content
-      
-      console.log(`📅 Reused API post ${totalPosts - remainingPosts + i + 1}/${totalPosts} for ${scheduledDate.toLocaleString()}`);
-      scheduleApiPost(post, scheduledDate);
+    // Convert to actual time
+    const postTime = new Date();
+    postTime.setHours(activeStartHour, 0, 0, 0);
+    postTime.setTime(postTime.getTime() + postTimeMs);
+    
+    // If time has passed, schedule for tomorrow
+    if (postTime <= new Date()) {
+      postTime.setDate(postTime.getDate() + 1);
     }
-  }
+    
+    // Add final random variance (± 45 minutes)
+    const variance = (Math.random() - 0.5) * 90 * 60 * 1000;
+    postTime.setTime(postTime.getTime() + variance);
+    
+    schedules.push(postTime);
+  });
   
-  console.log(`✅ Scheduled ${totalPosts} posts total: ${apiPostsScheduled} API + ${localPostsScheduled} local`);
+  return schedules.sort((a, b) => a - b);
 }
 
-// -------------------- Runner --------------------
-async function fetchAllAccountsSequentially() {
-  accountsProcessed = 0;
-  allPosts = [];
-  for (let acc of accounts) {
-    console.log(`⏳ Fetching posts for @${acc}...`);
-    await fetchPosts(acc);
-    await sleep(10000);
-  }
-  
-  // Add this line to schedule posts after fetching
-  schedulePosts();
-}
-
-// -------------------- Test post (videos → images → placeholder) --------------------
-async function testPost() {
-  let tempVideoPath = null;
-  let tempFramePath = null;
-
+async function executePostSafe(item, localQueue, type) {
   try {
-    console.log("🔑 Running test post...");
+    console.log(`🕒 Preparing ${type} post...`);
+    
+    // Extended random delay (1-4 minutes)
+    await randomDelay(60000, 240000);
+    
+    let mediaPath = null;
+    let isVideo = false;
+    let caption = type === "immediate" ? DEFAULT_IMMEDIATE_CAPTION : DEFAULT_SCHEDULED_CAPTION;
+    let sourceUsername = null;
 
-    // Check for local media first
-    const localFile = getRandomLocalMedia();
-    if (localFile) {
-      console.log("🧪 Test mode: posting local media", localFile);
-
-      await login();
-      const buffer = fs.readFileSync(localFile);
-
-      if (localFile.endsWith(".mp4")) {
-        // Check video duration
-        try {
-          const duration = await getVideoDuration(localFile);
-          if (duration < 3 || duration > 60) {
-            console.warn(`⚠️ Skipping invalid video (duration: ${duration}s)`);
-            // Try another local file
-            const nextFile = getRandomLocalMedia();
-            if (nextFile && nextFile !== localFile) {
-              console.log("🔄 Trying another local media instead...");
-              return testPost(); // Recursively try again
-            } else {
-              console.log("⚠️ No more valid local videos, using API content...");
-            }
-          }
-        } catch (err) {
-          console.error("❌ Error checking video duration:", err.message);
+    if (item) {
+      if (item.type === "local") {
+        if (fs.existsSync(item.path)) {
+          mediaPath = item.path;
+          isVideo = true;
+          console.log("📹 Using local video");
         }
-
-        let coverPath = placeholderPath;
-        try {
-          tempFramePath = path.join(__dirname, "temp_frame_local.jpg");
-          await extractVideoFrame(localFile, tempFramePath);
-          coverPath = tempFramePath;
-          console.log("🎬 Using video frame as cover image");
-        } catch (err) {
-          console.error("⚠️ Failed to grab frame, using logo");
+      } else if (item.type === "api") {
+        const dest = path.join(MEDIA_DIR, `api_${item.id}_${Date.now()}.mp4`);
+        mediaPath = await downloadApiMedia(item.url, dest);
+        isVideo = true;
+        sourceUsername = item.username;
+        if (item.caption) {
+          caption = item.caption.length > 80 ? item.caption.substring(0, 80) + '...' : item.caption;
         }
-
-        await ig.publish.video({
-          video: buffer,
-          coverImage: fs.readFileSync(coverPath),
-          caption: buildCaption(),
-        });
-        console.log("✅ Local video test post complete");
-      } else {
-        await ig.publish.photo({
-          file: buffer,
-          caption: buildCaption(),
-        });
-        console.log("✅ Local photo test post complete");
+        console.log("🌐 Using API video");
       }
+    }
 
-      // Save to history
-      postedHistory.push({
-        id: path.basename(localFile),
-        timestamp: Date.now(),
-        username: "local",
-        media_type: localFile.endsWith(".mp4") ? 2 : 1,
-        success: true,
-        source: "local",
-      });
-      fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2));
+    // Fallback with longer delays
+    if (!mediaPath && localQueue.length > 0) {
+      await randomDelay(30000, 60000); // 30-60s delay
+      const randomLocal = localQueue[Math.floor(Math.random() * localQueue.length)];
+      if (fs.existsSync(randomLocal.path)) {
+        mediaPath = randomLocal.path;
+        isVideo = true;
+        console.log("📹 Fallback to random local video");
+      }
+    }
+
+    if (!mediaPath && fs.existsSync(PLACEHOLDER_IMG)) {
+      await randomDelay(30000, 60000); // 30-60s delay
+      mediaPath = PLACEHOLDER_IMG;
+      isVideo = false;
+      console.log("🖼️ Fallback to placeholder image");
+    }
+
+    if (!mediaPath) {
+      console.error("❌ No media available for post.");
       return;
     }
 
-    // -------------------- API fallback --------------------
-    await login();
-    for (let account of accounts) {
-      const result = await fetchMediaFromAccount(account, 2); // Prefer video
-      if (result) {
-        console.log(`✅ Found video from @${account}`);
+    // Enhanced caption variation
+    caption = varyCaptionAdvanced(caption, sourceUsername);
 
-        // Download video
-        const res = await axios.get(result.mediaUrl, {
-          responseType: "arraybuffer",
-          timeout: 30000,
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-          },
-        });
+    // Final random delay before posting (30-90 seconds)
+    await randomDelay(30000, 90000);
 
-        tempVideoPath = path.join(__dirname, "temp_video.mp4");
-        fs.writeFileSync(tempVideoPath, res.data);
-
-        // Check duration
-        try {
-          const duration = await getVideoDuration(tempVideoPath);
-          if (duration < 3 || duration > 60) {
-            console.warn(`⚠️ Skipping API video (duration: ${duration}s)`);
-            continue; // Try next account
-          }
-        } catch (err) {
-          console.error("❌ Error checking video duration:", err.message);
-          continue;
-        }
-
-        let coverImagePath = placeholderPath;
-        if (!shouldUseLogo()) {
-          try {
-            tempFramePath = path.join(__dirname, "temp_frame.jpg");
-            await extractVideoFrame(tempVideoPath, tempFramePath);
-            coverImagePath = tempFramePath;
-            console.log("🎬 Using video frame as cover image");
-          } catch (frameErr) {
-            console.error("⚠️ Failed to grab frame, using logo");
-          }
-        }
-
-        await ig.publish.video({
-          video: fs.readFileSync(tempVideoPath),
-          coverImage: fs.readFileSync(coverImagePath),
-          caption: buildCaption(account),
-        });
-        console.log("✅ API video test post complete");
-        return;
-      }
-    }
-
-    // -------------------- Placeholder fallback --------------------
-    console.log("⚠️ No local or API media found, posting placeholder...");
-    await ig.publish.photo({
-      file: fs.readFileSync(placeholderPath),
-      caption: buildCaption(),
-    });
-    console.log("✅ Placeholder test post complete");
+    console.log("📤 Publishing post...");
+    await publishMedia(mediaPath, caption, isVideo);
+    console.log(`✅ ${type} post published at ${fmtTime(new Date())}`);
+    
+    // Post-publish delay (avoid rapid successive actions)
+    await randomDelay(120000, 240000);
+    
   } catch (err) {
-    console.error("❌ Test post failed:", err.message);
-  } finally {
-    if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-      fs.unlinkSync(tempVideoPath);
-      console.log("🧹 Cleaned up temporary video file");
-    }
-    if (tempFramePath && fs.existsSync(tempFramePath)) {
-      fs.unlinkSync(tempFramePath);
-      console.log("🧹 Cleaned up temporary frame file");
-    }
+    console.error(`❌ ${type} upload failed:`, err.message);
+    // Extended delay on error
+    await randomDelay(300000, 600000);
   }
 }
 
-// -------------------- Runner --------------------
-(async () => {
-  console.log("Running on Render:", process.env.RENDER || false);
+async function schedulePostsUltraSafe(apiQueue, localQueue) {
+  clearSeenPostsIfNeeded();
+  persistSeen();
 
-  if (process.argv.includes("--test")) {
-    console.log("🔍 Running in test mode...");
-    await testPost();
-    console.log("✅ Test completed");
-    process.exit(0);
-  } else {
-    console.log("🔍 Running in scheduled mode...");
-    await login();
-    await fetchAllAccountsSequentially();
+  const combined = [
+    ...apiQueue.map((i) => ({ 
+      id: i.id, 
+      url: i.url, 
+      is_video: true, 
+      type: "api", 
+      caption: i.caption,
+      username: i.username
+    })),
+    ...localQueue.map((item) => ({ 
+      path: item.path, 
+      is_video: true, 
+      type: "local" 
+    })),
+  ];
+
+  const scheduleTimes = generateHumanLikeSchedule();
+  const toSchedule = Math.min(scheduleTimes.length, combined.length || scheduleTimes.length);
+  
+  console.log(`📅 Ultra-safe schedule (${toSchedule} posts):`);
+  
+  for (let i = 0; i < toSchedule; i++) {
+    const item = combined[i % combined.length] || null;
+    const postTime = scheduleTimes[i];
+    
+    const delayMs = Math.max(postTime.getTime() - Date.now(), 1000);
+    
+    console.log(`   #${i + 1} → ${fmtTime(postTime)}`);
+
+    setTimeout(async () => {
+      // Extended random delay before posting (2-8 minutes)
+      await randomDelay(120000, 480000);
+      
+      await executePostSafe(item, localQueue, "scheduled");
+    }, delayMs);
   }
-})();
+}
+
+// ------------------------------ Keep-alive server -----------------------------
+function startServer() {
+  const app = express();
+  app.get("/", (_req, res) => res.send("Ultra-Safe Bot is alive"));
+  app.get("/healthz", (_req, res) => res.json({ 
+    ok: true, 
+    time: Date.now(),
+    mode: "ultra-safe",
+    posts_today: POSTS_PER_DAY()
+  }));
+  app.listen(PORT, () =>
+    console.log(`🌐 Keep-alive server on :${PORT} (Render: ${!!process.env.RENDER})`)
+  );
+}
+
+// ------------------------------ Main -----------------------------------------
+async function main() {
+  console.log("🚀 Starting ultra-safe bot (2-4 posts/day)...");
+  console.log("Using media directory:", MEDIA_DIR);
+  console.log("Anti-detection mode: ACTIVE");
+
+  // 25% chance to take a day off for safety
+  const takeDayOff = Math.random() < 0.25;
+  if (takeDayOff) {
+    console.log("🌴 Safety day off - skipping posts today (25% chance)");
+    startServer();
+    return;
+  }
+
+  loadSeen();
+  await ultraSafeLogin();
+
+  // Gather videos with extended delays
+  let apiItems = [];
+  for (const u of API_ACCOUNTS) {
+    console.log(`🔍 Scanning @${u}...`);
+    const items = await fetchUserVideosDirectly(u);
+    apiItems.push(...items);
+    
+    // Extended delay between account scans (3-6 minutes)
+    await randomDelay(180000, 360000);
+  }
+
+  // Mark API items as seen
+  apiItems.forEach(item => seenSet.add(item.id));
+  persistSeen();
+
+  const localVideos = findLocalVideos();
+
+  console.log(
+    `📦 Content pool → API: ${apiItems.length} video(s), Local: ${localVideos.length} video(s)`
+  );
+
+  // Immediate post with safety delays
+  if (apiItems.length > 0 || localVideos.length > 0) {
+    await executePostSafe(
+      apiItems.length > 0 ? { 
+        ...apiItems[0], 
+        type: "api" 
+      } : { ...localVideos[0], type: "local" }, 
+      localVideos, 
+      "immediate"
+    );
+  } else {
+    console.log("⚠️ No content available for immediate post");
+  }
+
+  // Ultra-safe scheduling
+  await schedulePostsUltraSafe(apiItems, localVideos);
+
+  // Web server
+  startServer();
+
+  console.log("✅ Bot running in ultra-safe mode (2-4 posts/day)");
+}
+
+main().catch((err) => {
+  console.error("❌ Fatal error:", err);
+  process.exit(1);
+});

@@ -78,8 +78,20 @@ if (!USERNAME || !PASSWORD) {
   process.exit(1);
 }
 
-if (!fs.existsSync(MEDIA_DIR)) {
-  fs.mkdirSync(MEDIA_DIR, { recursive: true });
+// Safe directory check for Render (DO NOT try to create directories)
+let ACTIVE_MEDIA_DIR = MEDIA_DIR;
+try {
+  // Just check if we can access the directory, don't create it
+  if (!fs.existsSync(MEDIA_DIR)) {
+    console.warn(`⚠️ Media directory does not exist: ${MEDIA_DIR}`);
+    console.log("📁 Using current directory for media storage");
+    ACTIVE_MEDIA_DIR = __dirname; // Fallback to current directory
+  } else {
+    console.log("✅ Media directory accessible:", MEDIA_DIR);
+  }
+} catch (error) {
+  console.warn("⚠️ Could not access media directory, using current directory");
+  ACTIVE_MEDIA_DIR = __dirname;
 }
 
 // ------------------------------ Globals --------------------------------------
@@ -411,14 +423,14 @@ function markVideoAsUsed(filename) {
   saveVideoUsage(usage);
   console.log(`📊 Updated usage for ${filename}: ${usage[filename]} time(s)`);
   
-  // Delete if posted enough times
+  // Delete if posted enough times (only if we have write access)
   if (usage[filename] >= LOCAL_MEDIA_USAGE_LIMIT) {
     deleteVideoFile(filename);
   }
 }
 
 function deleteVideoFile(filename) {
-  const filePath = path.join(MEDIA_DIR, filename);
+  const filePath = path.join(ACTIVE_MEDIA_DIR, filename);
   try {
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
@@ -430,7 +442,7 @@ function deleteVideoFile(filename) {
       saveVideoUsage(usage);
     }
   } catch (e) {
-    console.error(`❌ Failed to delete ${filename}:`, e.message);
+    console.warn(`⚠️ Could not delete ${filename} (read-only filesystem?):`, e.message);
   }
 }
 
@@ -454,19 +466,19 @@ async function downloadApiMedia(url, filepath) {
 }
 
 function findLocalVideos() {
-  if (!fs.existsSync(MEDIA_DIR)) {
-    console.log("Media directory does not exist:", MEDIA_DIR);
+  if (!fs.existsSync(ACTIVE_MEDIA_DIR)) {
+    console.log("Media directory does not exist:", ACTIVE_MEDIA_DIR);
     return [];
   }
   
-  const files = fs.readdirSync(MEDIA_DIR);
+  const files = fs.readdirSync(ACTIVE_MEDIA_DIR);
   const videoFiles = files.filter((f) => isVideoFile(f));
   const usage = loadVideoUsage();
   
   console.log(`Found ${videoFiles.length} local video files`);
   
   const availableVideos = videoFiles.map((f) => {
-    const filePath = path.join(MEDIA_DIR, f);
+    const filePath = path.join(ACTIVE_MEDIA_DIR, f);
     const usageCount = usage[f] || 0;
     
     return {
@@ -657,7 +669,7 @@ async function executePostSafe(item, localQueue, type) {
       } else if (item.type === "api") {
         // Only use API content if we're not prioritizing local media
         if (!PRIORITIZE_LOCAL_MEDIA) {
-          const dest = path.join(MEDIA_DIR, `api_${item.id}_${Date.now()}.mp4`);
+          const dest = path.join(ACTIVE_MEDIA_DIR, `api_${item.id}_${Date.now()}.mp4`);
           mediaPath = await downloadApiMedia(item.url, dest);
           isVideo = true;
           sourceUsername = item.username;
@@ -791,7 +803,7 @@ function startServer() {
 // ------------------------------ Main -----------------------------------------
 async function main() {
   console.log("🚀 Starting ultra-safe bot (2-4 posts/day)...");
-  console.log("Using media directory:", MEDIA_DIR);
+  console.log("Using media directory:", ACTIVE_MEDIA_DIR);
   console.log(`📹 MODE: ${PRIORITIZE_LOCAL_MEDIA ? 'LOCAL MEDIA PRIORITY' : 'API CONTENT PRIORITY'}`);
   console.log(`🔄 Local files will be deleted after ${LOCAL_MEDIA_USAGE_LIMIT} posts`);
 

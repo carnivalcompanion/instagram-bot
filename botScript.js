@@ -68,6 +68,10 @@ const MAX_DELAY_BETWEEN_ACTIONS = 300000; // 5 minutes maximum
 // Keep-alive HTTP port (Render provides PORT)
 const PORT = Number(process.env.PORT || 3000);
 
+// ----------------------------- Configuration ---------------------------------
+const PRIORITIZE_LOCAL_MEDIA = true; // Set to false to use API content again
+const LOCAL_MEDIA_USAGE_LIMIT = 2; // Delete local files after this many posts
+
 // ------------------------------- Guards --------------------------------------
 if (!USERNAME || !PASSWORD) {
   console.error("❌ Missing environment variables. Set IG_USERNAME, IG_PASSWORD.");
@@ -377,6 +381,59 @@ async function fetchUserVideosDirectly(username) {
   }
 }
 
+// ------------------------------ Video Usage Tracking -------------------------
+function getVideoUsageFile() {
+  return path.join(__dirname, 'video_usage.json');
+}
+
+function loadVideoUsage() {
+  try {
+    if (fs.existsSync(getVideoUsageFile())) {
+      return JSON.parse(fs.readFileSync(getVideoUsageFile(), 'utf8'));
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to load video usage tracking:', e.message);
+  }
+  return {};
+}
+
+function saveVideoUsage(usage) {
+  try {
+    fs.writeFileSync(getVideoUsageFile(), JSON.stringify(usage, null, 2));
+  } catch (e) {
+    console.warn('⚠️ Failed to save video usage:', e.message);
+  }
+}
+
+function markVideoAsUsed(filename) {
+  const usage = loadVideoUsage();
+  usage[filename] = (usage[filename] || 0) + 1;
+  saveVideoUsage(usage);
+  console.log(`📊 Updated usage for ${filename}: ${usage[filename]} time(s)`);
+  
+  // Delete if posted enough times
+  if (usage[filename] >= LOCAL_MEDIA_USAGE_LIMIT) {
+    deleteVideoFile(filename);
+  }
+}
+
+function deleteVideoFile(filename) {
+  const filePath = path.join(MEDIA_DIR, filename);
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      console.log(`🗑️ Deleted ${filename} (posted ${LOCAL_MEDIA_USAGE_LIMIT} times)`);
+      
+      // Clean up usage record
+      const usage = loadVideoUsage();
+      delete usage[filename];
+      saveVideoUsage(usage);
+    }
+  } catch (e) {
+    console.error(`❌ Failed to delete ${filename}:`, e.message);
+  }
+}
+
 // ------------------------------ Media helpers --------------------------------
 async function downloadApiMedia(url, filepath) {
   try {
@@ -404,12 +461,33 @@ function findLocalVideos() {
   
   const files = fs.readdirSync(MEDIA_DIR);
   const videoFiles = files.filter((f) => isVideoFile(f));
+  const usage = loadVideoUsage();
   
-  console.log(`Found ${videoFiles.length} local video files:`, videoFiles);
-  return videoFiles.map((f) => ({
-    path: path.join(MEDIA_DIR, f),
-    is_video: true
-  }));
+  console.log(`Found ${videoFiles.length} local video files`);
+  
+  const availableVideos = videoFiles.map((f) => {
+    const filePath = path.join(MEDIA_DIR, f);
+    const usageCount = usage[f] || 0;
+    
+    return {
+      path: filePath,
+      filename: f,
+      is_video: true,
+      usageCount: usageCount,
+      canBeUsed: usageCount < LOCAL_MEDIA_USAGE_LIMIT
+    };
+  }).filter(video => video.canBeUsed);
+  
+  console.log(`📹 ${availableVideos.length} videos available (not posted ${LOCAL_MEDIA_USAGE_LIMIT} times yet)`);
+  
+  // Log usage statistics
+  videoFiles.forEach(f => {
+    const count = usage[f] || 0;
+    const status = count >= LOCAL_MEDIA_USAGE_LIMIT ? "✓ DONE" : `${LOCAL_MEDIA_USAGE_LIMIT - count} left`;
+    console.log(`   ${f}: posted ${count} time(s) [${status}]`);
+  });
+  
+  return availableVideos;
 }
 
 // Process video for Instagram (trim if needed)
@@ -570,22 +648,47 @@ async function executePostSafe(item, localQueue, type) {
           mediaPath = item.path;
           isVideo = true;
           console.log("📹 Using local video");
+          
+          // Track usage for local videos
+          if (item.filename) {
+            markVideoAsUsed(item.filename);
+          }
         }
       } else if (item.type === "api") {
-        const dest = path.join(MEDIA_DIR, `api_${item.id}_${Date.now()}.mp4`);
-        mediaPath = await downloadApiMedia(item.url, dest);
-        isVideo = true;
-        sourceUsername = item.username;
-        if (item.caption) {
-          caption = item.caption.length > 80 ? item.caption.substring(0, 80) + '...' : item.caption;
+        // Only use API content if we're not prioritizing local media
+        if (!PRIORITIZE_LOCAL_MEDIA) {
+          const dest = path.join(MEDIA_DIR, `api_${item.id}_${Date.now()}.mp4`);
+          mediaPath = await downloadApiMedia(item.url, dest);
+          isVideo = true;
+          sourceUsername = item.username;
+          if (item.caption) {
+            caption = item.caption.length > 80 ? item.caption.substring(0, 80) + '...' : item.caption;
+          }
+          console.log("🌐 Using API video");
+        } else {
+          console.log("📹 API content skipped (local media priority mode)");
         }
-        console.log("🌐 Using API video");
       }
     }
 
-    // Fallback with longer delays
-    if (!mediaPath && localQueue.length > 0) {
-      await randomDelay(30000, 60000); // 30-60s delay
+    // If prioritizing local media, try local files first as fallback
+    if (PRIORITIZE_LOCAL_MEDIA && !mediaPath && localQueue.length > 0) {
+      await randomDelay(30000, 60000);
+      const availableLocal = localQueue.filter(video => video.canBeUsed);
+      if (availableLocal.length > 0) {
+        const randomLocal = availableLocal[Math.floor(Math.random() * availableLocal.length)];
+        if (fs.existsSync(randomLocal.path)) {
+          mediaPath = randomLocal.path;
+          isVideo = true;
+          console.log("📹 Fallback to random local video");
+          markVideoAsUsed(randomLocal.filename);
+        }
+      }
+    }
+
+    // Fallback to API content only if not prioritizing local media
+    if (!PRIORITIZE_LOCAL_MEDIA && !mediaPath && localQueue.length > 0) {
+      await randomDelay(30000, 60000);
       const randomLocal = localQueue[Math.floor(Math.random() * localQueue.length)];
       if (fs.existsSync(randomLocal.path)) {
         mediaPath = randomLocal.path;
@@ -631,16 +734,18 @@ async function schedulePostsUltraSafe(apiQueue, localQueue) {
   persistSeen();
 
   const combined = [
-    ...apiQueue.map((i) => ({ 
+    // Only include API items if we're not prioritizing local media
+    ...(PRIORITIZE_LOCAL_MEDIA ? [] : apiQueue.map((i) => ({ 
       id: i.id, 
       url: i.url, 
       is_video: true, 
       type: "api", 
       caption: i.caption,
       username: i.username
-    })),
+    }))),
     ...localQueue.map((item) => ({ 
       path: item.path, 
+      filename: item.filename,
       is_video: true, 
       type: "local" 
     })),
@@ -657,7 +762,7 @@ async function schedulePostsUltraSafe(apiQueue, localQueue) {
     
     const delayMs = Math.max(postTime.getTime() - Date.now(), 1000);
     
-    console.log(`   #${i + 1} → ${fmtTime(postTime)}`);
+    console.log(`   #${i + 1} → ${fmtTime(postTime)} - ${item ? (item.type === 'local' ? 'LOCAL' : 'API') : 'fallback'}`);
 
     setTimeout(async () => {
       // Extended random delay before posting (2-8 minutes)
@@ -687,7 +792,8 @@ function startServer() {
 async function main() {
   console.log("🚀 Starting ultra-safe bot (2-4 posts/day)...");
   console.log("Using media directory:", MEDIA_DIR);
-  console.log("Anti-detection mode: ACTIVE");
+  console.log(`📹 MODE: ${PRIORITIZE_LOCAL_MEDIA ? 'LOCAL MEDIA PRIORITY' : 'API CONTENT PRIORITY'}`);
+  console.log(`🔄 Local files will be deleted after ${LOCAL_MEDIA_USAGE_LIMIT} posts`);
 
   // 25% chance to take a day off for safety
   const takeDayOff = Math.random() < 0.25;
@@ -700,7 +806,7 @@ async function main() {
   loadSeen();
   await ultraSafeLogin();
 
-  // Gather videos with extended delays
+  // Gather videos with extended delays (API content still fetched but may not be used)
   let apiItems = [];
   for (const u of API_ACCOUNTS) {
     console.log(`🔍 Scanning @${u}...`);
@@ -721,16 +827,25 @@ async function main() {
     `📦 Content pool → API: ${apiItems.length} video(s), Local: ${localVideos.length} video(s)`
   );
 
-  // Immediate post with safety delays
+  // Immediate post with safety delays - prioritize local media if configured
   if (apiItems.length > 0 || localVideos.length > 0) {
-    await executePostSafe(
-      apiItems.length > 0 ? { 
-        ...apiItems[0], 
-        type: "api" 
-      } : { ...localVideos[0], type: "local" }, 
-      localVideos, 
-      "immediate"
-    );
+    let immediateItem;
+    
+    if (PRIORITIZE_LOCAL_MEDIA && localVideos.length > 0) {
+      // Prioritize local media
+      immediateItem = { ...localVideos[0], type: "local" };
+      console.log("📹 Immediate post: Using local media (priority mode)");
+    } else if (apiItems.length > 0) {
+      // Use API content if available and not prioritizing local
+      immediateItem = { ...apiItems[0], type: "api" };
+      console.log("🌐 Immediate post: Using API content");
+    } else if (localVideos.length > 0) {
+      // Fallback to local media
+      immediateItem = { ...localVideos[0], type: "local" };
+      console.log("📹 Immediate post: Fallback to local media");
+    }
+    
+    await executePostSafe(immediateItem, localVideos, "immediate");
   } else {
     console.log("⚠️ No content available for immediate post");
   }

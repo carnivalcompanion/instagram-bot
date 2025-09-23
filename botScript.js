@@ -802,6 +802,9 @@ function startServer() {
 
 // ------------------------------ Main -----------------------------------------
 async function main() {
+  // Start the server IMMEDIATELY so Render can detect the port
+  startServer();
+  
   console.log("🚀 Starting ultra-safe bot (2-4 posts/day)...");
   console.log("Using media directory:", ACTIVE_MEDIA_DIR);
   console.log(`📹 MODE: ${PRIORITIZE_LOCAL_MEDIA ? 'LOCAL MEDIA PRIORITY' : 'API CONTENT PRIORITY'}`);
@@ -811,7 +814,7 @@ async function main() {
   const takeDayOff = Math.random() < 0.25;
   if (takeDayOff) {
     console.log("🌴 Safety day off - skipping posts today (25% chance)");
-    startServer();
+    // Server is already running for health checks
     return;
   }
 
@@ -865,12 +868,11 @@ async function main() {
   // Ultra-safe scheduling
   await schedulePostsUltraSafe(apiItems, localVideos);
 
-  // Web server
-  startServer();
-
   console.log("✅ Bot running in ultra-safe mode (2-4 posts/day)");
+  
+  // Keep the process alive for scheduled posts
+  // The server is already running from the startServer() call above
 }
-
 main().catch((err) => {
   console.error("❌ Fatal error:", err);
   process.exit(1);

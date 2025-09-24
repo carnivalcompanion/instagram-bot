@@ -32,7 +32,8 @@ const API_ACCOUNTS =
     .filter(Boolean);
 
 // Where to read local media from (MP4/MOV/AVI/MKV - videos only)
-const MEDIA_DIR = path.resolve(process.env.LOCAL_MEDIA_DIR || path.join(__dirname, "localMedia"));
+const MEDIA_DIR = process.env.LOCAL_MEDIA_DIR || 
+    (process.env.RENDER ? path.join(require('os').tmpdir(), "localMedia") : path.join(__dirname, "localMedia"));
 // Placeholder if API + local fail (should be an image)
 const PLACEHOLDER_IMG = path.resolve(process.env.PLACEHOLDER_IMG || path.join(__dirname, "placeholder.jpg"));
 // Session state (persist login)
@@ -69,7 +70,7 @@ const MAX_DELAY_BETWEEN_ACTIONS = 300000; // 5 minutes maximum
 const PORT = Number(process.env.PORT || 3000);
 
 // ----------------------------- Configuration ---------------------------------
-const PRIORITIZE_LOCAL_MEDIA = true; // Set to false to use API content again
+const PRIORITIZE_LOCAL_MEDIA = false; // Set to false to use API content on Render
 const LOCAL_MEDIA_USAGE_LIMIT = 2; // Delete local files after this many posts
 
 // ------------------------------- Guards --------------------------------------
@@ -78,23 +79,35 @@ if (!USERNAME || !PASSWORD) {
   process.exit(1);
 }
 
-// FIXED: Create directory if it doesn't exist
-let ACTIVE_MEDIA_DIR = MEDIA_DIR;
+// FIXED: Render-compatible directory handling
+let ACTIVE_MEDIA_DIR;
 try {
-  if (!fs.existsSync(MEDIA_DIR)) {
-    console.log(`📁 Creating media directory: ${MEDIA_DIR}`);
-    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+  // On Render, use the temp directory which is writable
+  if (process.env.RENDER) {
+    ACTIVE_MEDIA_DIR = path.join(require('os').tmpdir(), 'localMedia');
+    console.log(`🌐 Render environment detected, using temp directory: ${ACTIVE_MEDIA_DIR}`);
+  } else {
+    // Local development - use the original path
+    ACTIVE_MEDIA_DIR = MEDIA_DIR;
+    console.log(`💻 Local environment, using directory: ${ACTIVE_MEDIA_DIR}`);
+  }
+  
+  // Create directory if it doesn't exist
+  if (!fs.existsSync(ACTIVE_MEDIA_DIR)) {
+    console.log(`📁 Creating media directory: ${ACTIVE_MEDIA_DIR}`);
+    fs.mkdirSync(ACTIVE_MEDIA_DIR, { recursive: true });
     console.log("✅ Media directory created successfully");
   }
   
   // Verify we can access the directory
-  const files = fs.readdirSync(MEDIA_DIR);
+  const files = fs.readdirSync(ACTIVE_MEDIA_DIR);
   console.log(`✅ Media directory accessible. Contains ${files.length} files:`, files);
   
 } catch (error) {
   console.error("❌ Cannot create or access media directory:", error.message);
-  console.log("📁 Falling back to current directory");
+  // Final fallback to current directory
   ACTIVE_MEDIA_DIR = __dirname;
+  console.log(`📁 Falling back to: ${ACTIVE_MEDIA_DIR}`);
 }
 
 // ------------------------------ Globals --------------------------------------
@@ -398,7 +411,9 @@ async function fetchUserVideosDirectly(username) {
 
 // ------------------------------ Video Usage Tracking -------------------------
 function getVideoUsageFile() {
-  return path.join(__dirname, 'video_usage.json');
+  // Use temp directory on Render to avoid permission issues
+  const baseDir = process.env.RENDER ? require('os').tmpdir() : __dirname;
+  return path.join(baseDir, 'video_usage.json');
 }
 
 function loadVideoUsage() {
@@ -888,4 +903,4 @@ async function main() {
 main().catch((err) => {
   console.error("❌ Fatal error:", err);
   process.exit(1);
-});
+}

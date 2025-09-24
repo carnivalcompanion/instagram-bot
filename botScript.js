@@ -78,19 +78,22 @@ if (!USERNAME || !PASSWORD) {
   process.exit(1);
 }
 
-// Safe directory check for Render (DO NOT try to create directories)
+// FIXED: Create directory if it doesn't exist
 let ACTIVE_MEDIA_DIR = MEDIA_DIR;
 try {
-  // Just check if we can access the directory, don't create it
   if (!fs.existsSync(MEDIA_DIR)) {
-    console.warn(`⚠️ Media directory does not exist: ${MEDIA_DIR}`);
-    console.log("📁 Using current directory for media storage");
-    ACTIVE_MEDIA_DIR = __dirname; // Fallback to current directory
-  } else {
-    console.log("✅ Media directory accessible:", MEDIA_DIR);
+    console.log(`📁 Creating media directory: ${MEDIA_DIR}`);
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+    console.log("✅ Media directory created successfully");
   }
+  
+  // Verify we can access the directory
+  const files = fs.readdirSync(MEDIA_DIR);
+  console.log(`✅ Media directory accessible. Contains ${files.length} files:`, files);
+  
 } catch (error) {
-  console.warn("⚠️ Could not access media directory, using current directory");
+  console.error("❌ Cannot create or access media directory:", error.message);
+  console.log("📁 Falling back to current directory");
   ACTIVE_MEDIA_DIR = __dirname;
 }
 
@@ -466,16 +469,25 @@ async function downloadApiMedia(url, filepath) {
 }
 
 function findLocalVideos() {
+  console.log(`🔍 Searching for local videos in: ${ACTIVE_MEDIA_DIR}`);
+  console.log(`📁 Directory exists: ${fs.existsSync(ACTIVE_MEDIA_DIR)}`);
+  
   if (!fs.existsSync(ACTIVE_MEDIA_DIR)) {
-    console.log("Media directory does not exist:", ACTIVE_MEDIA_DIR);
+    console.log("❌ Media directory does not exist:", ACTIVE_MEDIA_DIR);
+    
+    // Show what's actually in the project root for debugging
+    const rootFiles = fs.readdirSync(__dirname);
+    console.log("📁 Files in project root:", rootFiles);
     return [];
   }
   
   const files = fs.readdirSync(ACTIVE_MEDIA_DIR);
+  console.log(`📁 All files in media directory:`, files);
+  
   const videoFiles = files.filter((f) => isVideoFile(f));
   const usage = loadVideoUsage();
   
-  console.log(`Found ${videoFiles.length} local video files`);
+  console.log(`🎬 Found ${videoFiles.length} video files:`, videoFiles);
   
   const availableVideos = videoFiles.map((f) => {
     const filePath = path.join(ACTIVE_MEDIA_DIR, f);
@@ -876,4 +888,4 @@ async function main() {
 main().catch((err) => {
   console.error("❌ Fatal error:", err);
   process.exit(1);
-});
+}

@@ -1,322 +1,282 @@
-// -----------------------------------------------------------------------------
-// Instagram Bot — Ultra-Safe Anti-Detection Mode (3–5 posts/day)
-// Videos from API & local media, with credit to creators
-// Advanced human-like patterns to avoid detection
-// -----------------------------------------------------------------------------
-// Node: >= 18 (uses built-in fetch), ESM module
-// -----------------------------------------------------------------------------
+// -------------------- Keep-alive server --------------------
+const express = require('express');
+const keepAliveApp = express();
+const keepAlivePort = process.env.PORT || 3000;
 
-import fs from "fs";
-import path from "path";
-import express from "express";
-import dotenv from "dotenv";
-import { IgApiClient } from "instagram-private-api";
-import { fileURLToPath } from "url";
-import ffmpeg from "fluent-ffmpeg";
-import os from "os";
+keepAliveApp.get('/', (req, res) => {
+  res.send('Node.js Bot is alive!');
+});
 
-dotenv.config();
+keepAliveApp.listen(keepAlivePort, () => {
+  console.log(`Keep-alive server running on port ${keepAlivePort}`);
+});
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// -------------------- Imports & Config --------------------
+require("dotenv").config();
+const { IgApiClient } = require("instagram-private-api");
+const axios = require("axios");
+const schedule = require("node-schedule");
+const fs = require("fs");
+const path = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("ffmpeg-static");
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ----------------------------- Config ----------------------------------------
-const USERNAME = process.env.IG_USERNAME;
-const PASSWORD = process.env.IG_PASSWORD;
+console.log("🚀 Script starting...");
+console.log("Arguments:", process.argv);
 
-const API_ACCOUNTS =
-  (process.env.API_ACCOUNTS || "aircommittee3,fuzionmas,scorchmag,yardmascarnival")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-const PLACEHOLDER_IMG = path.resolve(
-  process.env.PLACEHOLDER_IMG || path.join(__dirname, "placeholder.jpg")
-);
-const SESSION_FILE = path.resolve(
-  process.env.SESSION_FILE || path.join(__dirname, "session.json")
-);
-const SEEN_FILE = path.resolve(
-  process.env.SEEN_FILE || path.join(__dirname, "seen.json")
-);
-
-const DEFAULT_IMMEDIATE_CAPTION =
-  process.env.IMMEDIATE_CAPTION || "🔥 Fresh carnival content!";
-const DEFAULT_SCHEDULED_CAPTION =
-  process.env.SCHEDULED_CAPTION || "🎭 Carnival vibes!";
-
-const CARNIVAL_HASHTAGS = [
-  "#TrinidadCarnival", "#CaribbeanCarnival", "#CarnivalVibes", "#Masquerade", "#Fete",
-  "#CarnivalLife", "#CarnivalSpirit", "#CarnivalSeason", "#MasBand", "#Costume",
-  "#Steelpan", "#SocaMusic", "#Calypso", "#Dancehall", "#CaribbeanCulture",
-  "#IslandVibes", "#TropicalVibes", "#WestIndianCulture", "#CaribbeanLife", "#IslandLife",
-  "#Carnival2024", "#Carnival2025", "#CarnivalParty", "#RoadMarch", "#Jouvert",
-  "#CarnivalDancer", "#CarnivalCostume", "#Soca", "#CaribbeanMusic", "#TriniCulture",
-  "#WestIndianHeritage", "#CaribbeanHeritage", "#CarnivalTradition", "#Masquerader",
-  "#CarnivalFeathers", "#CarnivalMakeup", "#CarnivalDance", "#SocaParty", "#FeteLife"
+const accounts = [
+  "aircommittee3", "illusionsmas", "reignmasband", "shineymas",
+  "Livcarnival", "fantasykarnival", "chocolatenationmas",
+  "tropicalfusionmas", "carnivalsaintlucia", "jabjabofficial",
+  "fuzionmas", "scorchmag", "yardmascarnival"
 ];
 
-const POSTS_PER_DAY = () => Math.floor(Math.random() * 3) + 3; // 3–5/day
-const MIN_DELAY_BETWEEN_ACTIONS = 60000;
-const MAX_DELAY_BETWEEN_ACTIONS = 300000;
-const PORT = Number(process.env.PORT || 3000);
+const username = process.env.IG_USERNAME;
+const password = process.env.IG_PASSWORD;
+const rapidApiKey = process.env.RAPIDAPI_KEY;
 
-const PRIORITIZE_LOCAL_MEDIA = true;
-const LOCAL_MEDIA_USAGE_LIMIT = 2;
+const localMediaDir = path.join(__dirname, "localMedia");
+const placeholderPath = path.join(__dirname, "placeholder.jpg");
+const sessionFile = "igSession.json";
+const historyFile = "postedHistory.json";
 
-// ----------------------------- Media directory -------------------------------
-let ACTIVE_MEDIA_DIR;
-try {
-  if (process.env.RENDER) {
-    ACTIVE_MEDIA_DIR = path.join(os.tmpdir(), "localMedia");
-  } else {
-    ACTIVE_MEDIA_DIR = path.join(__dirname, "localMedia");
-  }
-  if (!fs.existsSync(ACTIVE_MEDIA_DIR))
-    fs.mkdirSync(ACTIVE_MEDIA_DIR, { recursive: true });
-} catch (error) {
-  console.error("❌ Cannot create/access media directory:", error.message);
-  ACTIVE_MEDIA_DIR = __dirname;
+if (!username || !password || !rapidApiKey) {
+  console.error("❌ Missing env variables. Set IG_USERNAME, IG_PASSWORD, RAPIDAPI_KEY.");
+  process.exit(1);
 }
 
-// ----------------------------- Globals ---------------------------------------
+// -------------------- Instagram & History --------------------
 const ig = new IgApiClient();
-let seenState = { lastCleared: Date.now(), ids: [] };
-let seenSet = new Set();
-let localMediaUsage = {};
+let postedHistory = [];
 
-// ----------------------------- Utilities -------------------------------------
-function loadJSON(filePath, fallback) {
-  try {
-    if (fs.existsSync(filePath))
-      return JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch (e) {
-    console.warn(e);
+if (fs.existsSync(historyFile)) {
+  try { postedHistory = JSON.parse(fs.readFileSync(historyFile, "utf8")); } 
+  catch { postedHistory = []; }
+}
+
+// -------------------- Hashtags & Captions --------------------
+const year = new Date().getFullYear();
+const hashtagPool = [
+  "#carnival","#soca","#caribbean","#trinidadcarnival","#carnaval","#fete",
+  "#socamusic","#carnivalcostume","#mas","#jouvert","#caribbeancarnival","#cropover",
+  "#playmas","#jabjab","#socavibes","#carnivalculture",`#carnival${year}`,`#soca${year}`
+];
+
+const captionTemplates = [
+  "Having fun at the carnival! 🎉","Another great day for soca and music! 🥳",
+  "Making memories that last forever! 🍹","Colors, feathers, and pure freedom! 🪶✨",
+  "This is how we do carnival in the islands 🌴🔥","Soca therapy in full effect! 🎶💃",
+  "Energy too high to calm down 🚀","Every beat of the drum tells a story 🥁❤️",
+  "Mas is not just a festival, it's a lifestyle 🌟","From sunrise to sunset, pure carnival spirit 🌞🌙",
+  "One love, one people, one carnival 💛💚❤️"
+];
+
+function getRandomHashtags(n = 5) {
+  const shuffled = [...hashtagPool].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, n).join(" ");
+}
+
+function buildCaption(originalUser = null) {
+  const randomText = captionTemplates[Math.floor(Math.random() * captionTemplates.length)];
+  const hashtags = getRandomHashtags();
+  const allTags = `${hashtags} #CarnivalCompanion`.split(" ").filter((tag,i,self)=>tag&&self.indexOf(tag)===i).join(" ");
+  const credit = originalUser ? `\n\n📸 @${originalUser}` : "";
+  return `${randomText}\n\n${allTags}${credit}`;
+}
+
+// -------------------- Utility Functions --------------------
+function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
+
+function getRandomLocalMedia() {
+  if (!fs.existsSync(localMediaDir)) return null;
+  const files = fs.readdirSync(localMediaDir).filter(f=>/\.(jpg|jpeg|png|mp4)$/i.test(f));
+  const usedFiles = new Set(postedHistory.filter(h=>h.source==="local").map(h=>h.id));
+  const unused = files.filter(f=>!usedFiles.has(f));
+  if (unused.length===0) {
+    postedHistory = postedHistory.filter(h=>h.source!=="local");
+    fs.writeFileSync(historyFile, JSON.stringify(postedHistory,null,2));
+    return path.join(localMediaDir, files[Math.floor(Math.random()*files.length)]);
   }
-  return fallback;
+  return path.join(localMediaDir, unused[Math.floor(Math.random()*unused.length)]);
 }
-function saveJSON(filePath, obj) {
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(obj, null, 2));
-  } catch (e) {
-    console.warn(e);
-  }
-}
-function loadSeen() {
-  seenState = loadJSON(SEEN_FILE, { lastCleared: Date.now(), ids: [] });
-  seenSet = new Set(seenState.ids || []);
-}
-function persistSeen() {
-  seenState.ids = Array.from(seenSet);
-  saveJSON(SEEN_FILE, seenState);
-}
-function clearSeenPostsIfNeeded() {
-  const now = Date.now(),
-    TWO_DAYS = 2 * 24 * 60 * 60 * 1000;
-  if (now - (seenState.lastCleared || 0) > TWO_DAYS) {
-    seenSet.clear();
-    seenState.lastCleared = now;
-    persistSeen();
-    console.log("🧹 Cleared seen post IDs");
-  }
-}
-function fmtTime(d) {
-  return d.toLocaleString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    month: "numeric",
-    day: "numeric",
-    year: "numeric",
-    hour12: true,
+
+function getVideoDuration(filePath){
+  return new Promise((resolve,reject)=>{
+    ffmpeg.ffprobe(filePath,(err,meta)=>err?reject(err):resolve(meta.format.duration));
   });
 }
-function isVideoFile(f) {
-  return /\.(mp4|mov|avi|mkv|webm)$/i.test(f);
+
+function extractVideoFrame(videoPath, outputPath){
+  return new Promise((resolve,reject)=>{
+    ffmpeg(videoPath).screenshots({
+      timestamps:["00:00:01"],
+      filename:path.basename(outputPath),
+      folder:path.dirname(outputPath),
+      size:"720x1280"
+    }).on('end',()=>resolve(outputPath))
+      .on('error',err=>reject(err));
+  });
 }
-function getRandomHashtags(count = 8) {
-  const shuffled = [...CARNIVAL_HASHTAGS].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, count).join(" ");
-}
-function generateCaption(baseCaption, sourceUsername, isApiContent = false) {
-  let caption = baseCaption;
-  if (isApiContent && sourceUsername) {
-    caption += `\n\n🎥 Credit: @${sourceUsername}\n📌 Follow for daily carnival content!`;
-  } else {
-    caption += `\n\n📌 Follow @${USERNAME} for daily carnival content!`;
+
+async function login(){
+  ig.state.generateDevice(username);
+  if (fs.existsSync(sessionFile)) {
+    try{
+      await ig.state.deserialize(JSON.parse(fs.readFileSync(sessionFile)));
+      console.log("✅ Reused saved Instagram session");
+      return;
+    }catch{console.warn("⚠️ Failed to load session, logging in fresh...");}
   }
-  caption += `\n\n#CarnivalCompanion ${getRandomHashtags(8)}`;
-  return caption;
+  console.log("🔑 Logging in fresh...");
+  await ig.account.login(username,password);
+  const serialized = await ig.state.serialize(); delete serialized.constants;
+  fs.writeFileSync(sessionFile,JSON.stringify(serialized,null,2));
+  console.log("🔒 New session saved");
 }
-function varyCaptionAdvanced(baseCaption, sourceUsername) {
-  const variations = [
-    { prefix: "Loving the energy in this! ", emoji: "🔥" },
-    { prefix: "The vibes are incredible! ", emoji: "💃" },
-    { prefix: "This made my day! ", emoji: "✨" },
-    { prefix: "Can't get enough of this! ", emoji: "🎭" },
-    { prefix: "The culture is beautiful! ", emoji: "🌟" },
-    { prefix: "", emoji: "📸" },
-    { prefix: "Wow! ", emoji: "🎉" },
-    { prefix: "Incredible moment! ", emoji: "🙌" },
-  ];
-  const v = variations[Math.floor(Math.random() * variations.length)];
-  let newCaption = baseCaption;
-  if (Math.random() < 0.6) newCaption = v.prefix + newCaption;
-  newCaption = v.emoji + " " + newCaption;
-  if (Math.random() < 0.3) {
-    const locs = ["Trinidad", "Caribbean", "West Indies", "Island Life"];
-    newCaption +=
-      " " + locs[Math.floor(Math.random() * locs.length)] + " vibes!";
-  }
-  return generateCaption(newCaption, sourceUsername, sourceUsername !== null);
+
+async function refreshSession(){
+  try{
+    await ig.state.reset();
+    await login();
+    console.log("✅ Instagram session refreshed");
+  }catch(err){console.error("❌ Failed to refresh session:",err.message);}
 }
-async function randomDelay(
-  minMs = MIN_DELAY_BETWEEN_ACTIONS,
-  maxMs = MAX_DELAY_BETWEEN_ACTIONS
-) {
-  const delayMs = Math.random() * (maxMs - minMs) + minMs;
-  console.log(`⏳ Delaying for ${Math.round(delayMs / 1000)} seconds...`);
-  await new Promise((r) => setTimeout(r, delayMs));
-}
-function trackLocalMediaUsage(filename) {
-  if (!localMediaUsage[filename]) localMediaUsage[filename] = 0;
-  localMediaUsage[filename]++;
-  if (localMediaUsage[filename] >= LOCAL_MEDIA_USAGE_LIMIT) {
-    try {
-      const filePath = path.join(ACTIVE_MEDIA_DIR, filename);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        console.log(`🗑️ Deleted local media: ${filename}`);
-        delete localMediaUsage[filename];
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }
-}
-function getRandomLocalVideo() {
-  try {
-    const files = fs.readdirSync(ACTIVE_MEDIA_DIR).filter(isVideoFile);
-    if (files.length === 0) return null;
-    const available = files.filter(
-      (f) =>
-        !localMediaUsage[f] || localMediaUsage[f] < LOCAL_MEDIA_USAGE_LIMIT
-    );
-    if (available.length === 0) return null;
-    const file = available[Math.floor(Math.random() * available.length)];
-    trackLocalMediaUsage(file);
-    return path.join(ACTIVE_MEDIA_DIR, file);
-  } catch (e) {
-    console.error(e);
+
+// -------------------- Fetch API Media --------------------
+async function fetchMediaFromAccount(account, preferredType = null) {
+  try{
+    const normalized = account.toLowerCase().replace(/^\@/,"");
+    const response = await axios.get(`https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${normalized}`,{
+      headers: {"x-rapidapi-key":rapidApiKey,"x-rapidapi-host":"instagram-social-api.p.rapidapi.com"},
+      timeout:20000
+    });
+    let items = Array.isArray(response.data?.data?.items)?response.data.data.items:
+                Array.isArray(response.data?.items)?response.data.items:
+                Array.isArray(response.data)?response.data:[];
+    if(!items.length) return null;
+    let post = items.find(p=>preferredType?p.media_type===preferredType:true)||items[0];
+    let mediaUrl = post.media_type===2?post.video_versions?.[0]?.url||post.videos?.[0]?.url||post.carousel_media?.[0]?.video_versions?.[0]?.url:
+                   post.media_type===1||post.media_type===8?post.image_versions2?.candidates?.[0]?.url||post.images?.standard_resolution?.url||post.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url:null;
+    if(!mediaUrl) return null;
+    return {post,mediaUrl};
+  }catch(err){
+    console.error(`❌ Error fetching @${account}:`,err.message);
     return null;
   }
 }
 
-// ----------------------------- Instagram login -------------------------------
-async function saveSession() {
-  const serialized = await ig.state.serialize();
-  delete serialized.constants;
-  saveJSON(SESSION_FILE, serialized);
-  console.log("🔒 Session saved at", new Date().toLocaleString());
-}
-async function ultraSafeLogin() {
-  console.log("🔐 Forced fresh login initiated...");
-  if (fs.existsSync(SESSION_FILE)) {
-    fs.unlinkSync(SESSION_FILE);
-    console.log("🗑️ Old session file deleted");
-  }
-  ig.state.generateDevice(USERNAME);
-  await randomDelay(10000, 20000);
-  await ig.account.login(USERNAME, PASSWORD);
-  await saveSession();
-  console.log("✅ Fresh login confirmed for", USERNAME);
+// -------------------- Post Placeholder --------------------
+async function postPlaceholder(){
+  if(!fs.existsSync(placeholderPath)){console.error("❌ Placeholder missing"); return;}
+  try{
+    await login();
+    await ig.publish.photo({file:fs.readFileSync(placeholderPath),caption:buildCaption()});
+    console.log("✅ Placeholder posted");
+  }catch(err){console.error("❌ Failed to post placeholder:",err.message);}
 }
 
-// ----------------------------- Posting logic ---------------------------------
-async function postVideoFromLocalOrApi(isStartup = false) {
-  let videoPath = null;
-  let caption = "";
-
-  if (PRIORITIZE_LOCAL_MEDIA) {
-    videoPath = getRandomLocalVideo();
-    if (videoPath) {
-      caption = varyCaptionAdvanced(
-        isStartup ? DEFAULT_IMMEDIATE_CAPTION : DEFAULT_SCHEDULED_CAPTION,
-        null
-      );
-      console.log("📤 Ready to post local video:", videoPath);
+// -------------------- Post Media --------------------
+async function postLocalMedia(localFile){
+  let tempFramePath=null;
+  try{
+    await refreshSession();
+    const buffer = fs.readFileSync(localFile);
+    if(localFile.endsWith(".mp4")){
+      const duration = await getVideoDuration(localFile);
+      if(duration<3||duration>60){console.warn(`⚠️ Invalid video duration ${duration}s`); return false;}
+      tempFramePath = path.join(__dirname,"temp_frame_local.jpg");
+      await extractVideoFrame(localFile,tempFramePath);
+      await ig.publish.video({video:buffer,coverImage:fs.readFileSync(tempFramePath),caption:buildCaption()});
+      console.log("✅ Local video posted!");
+    }else{
+      await ig.publish.photo({file:buffer,caption:buildCaption()});
+      console.log("✅ Local photo posted!");
     }
-  }
+    postedHistory.push({id:path.basename(localFile),timestamp:Date.now(),username:"local",media_type:localFile.endsWith(".mp4")?2:1,success:true,source:"local"});
+    if(postedHistory.length>1000) postedHistory=postedHistory.slice(-1000);
+    fs.writeFileSync(historyFile,JSON.stringify(postedHistory,null,2));
+    return true;
+  }catch(err){console.error("❌ Error posting local media:",err.message); return false;}
+  finally{if(tempFramePath&&fs.existsSync(tempFramePath)) fs.unlinkSync(tempFramePath);}
+}
 
-  if (!videoPath) {
-    console.log("🔍 Fetching videos directly from API accounts...");
-    try {
-      const account = API_ACCOUNTS[Math.floor(Math.random() * API_ACCOUNTS.length)];
-      const userSearch = await ig.user.searchExact(account);
-      const userFeed = ig.feed.user(userSearch.pk);
-      const items = await userFeed.items();
-      const videoItem = items.find((i) => i.video_versions);
+async function postApiMedia(post){
+  let tempVideoPath=null,tempFramePath=null;
+  try{
+    await refreshSession();
+    const account=post.user?.username;
+    const fetched=await fetchMediaFromAccount(account,post.media_type);
+    if(!fetched){console.log("⚠️ No valid API media"); return false;}
+    const {post:fresh,mediaUrl}=fetched;
+    if(fresh.media_type===2){
+      const res=await axios.get(mediaUrl,{responseType:"arraybuffer",timeout:30000});
+      tempVideoPath=path.join(__dirname,"temp_video.mp4"); fs.writeFileSync(tempVideoPath,res.data);
+      const duration=await getVideoDuration(tempVideoPath);
+      if(duration<3||duration>60){console.warn(`⚠️ Invalid API video ${duration}s`); return false;}
+      tempFramePath=path.join(__dirname,"temp_frame.jpg");
+      await extractVideoFrame(tempVideoPath,tempFramePath);
+      await ig.publish.video({video:fs.readFileSync(tempVideoPath),coverImage:fs.readFileSync(tempFramePath),caption:buildCaption(account)});
+      console.log("✅ API video posted!");
+    }else{
+      const res=await axios.get(mediaUrl,{responseType:"arraybuffer"});
+      await ig.publish.photo({file:Buffer.from(res.data),caption:buildCaption(account)});
+      console.log("✅ API image posted!");
+    }
+    postedHistory.push({id:fresh.id,timestamp:Date.now(),username:account,media_type:fresh.media_type,success:true,source:"api"});
+    if(postedHistory.length>1000) postedHistory=postedHistory.slice(-1000);
+    fs.writeFileSync(historyFile,JSON.stringify(postedHistory,null,2));
+    return true;
+  }catch(err){console.error("❌ Error posting API media:",err.message); return false;}
+  finally{if(tempVideoPath&&fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath); if(tempFramePath&&fs.existsSync(tempFramePath)) fs.unlinkSync(tempFramePath);}
+}
 
-      if (videoItem) {
-        videoPath = videoItem.video_versions[0].url;
-        caption = varyCaptionAdvanced(
-          isStartup ? DEFAULT_IMMEDIATE_CAPTION : DEFAULT_SCHEDULED_CAPTION,
-          account
-        );
-        console.log("📤 Ready to post API video from @" + account);
+// -------------------- Scheduler --------------------
+function getRandomTime(){
+  const hour=6+Math.floor(Math.random()*16); const minute=Math.floor(Math.random()*60);
+  const now=new Date(); const dt=new Date(now); dt.setHours(hour,minute,0,0);
+  if(dt<now) dt.setDate(dt.getDate()+1); return dt;
+}
+
+function schedulePosts(allApiPosts){
+  const totalPosts=Math.floor(Math.random()*(5-3+1))+3;
+  console.log(`📅 Scheduling ${totalPosts} posts today`);
+  for(let i=0;i<totalPosts;i++){
+    const dt=getRandomTime();
+    schedule.scheduleJob(dt,async ()=>{
+      let localFile=getRandomLocalMedia();
+      if(localFile){
+        const success=await postLocalMedia(localFile);
+        if(!success && allApiPosts.length>0) await postApiMedia(allApiPosts[Math.floor(Math.random()*allApiPosts.length)]);
+        else if(!success) await postPlaceholder();
+      }else if(allApiPosts.length>0){
+        const success=await postApiMedia(allApiPosts[Math.floor(Math.random()*allApiPosts.length)]);
+        if(!success) await postPlaceholder();
+      }else{
+        await postPlaceholder();
       }
-    } catch (err) {
-      console.error("❌ Fetch failed:", err.message);
-    }
-  }
-
-  if (!videoPath) {
-    console.log("🖼️ Using placeholder as fallback");
-    videoPath = PLACEHOLDER_IMG;
-    caption = DEFAULT_SCHEDULED_CAPTION;
-  }
-
-  try {
-    await ig.publish.video({
-      video: fs.createReadStream(videoPath),
-      caption,
     });
-    console.log("✅ Post published successfully at", new Date().toLocaleTimeString());
-  } catch (err) {
-    console.error("❌ Failed to publish media:", err.message);
   }
 }
 
-// ----------------------------- Scheduler -------------------------------------
-async function scheduler() {
-  clearSeenPostsIfNeeded();
-  loadSeen();
-  console.log("📅 Generating posts for today...");
+// -------------------- Main Runner --------------------
+(async ()=>{
+  await login();
 
-  const numPosts = POSTS_PER_DAY();
-  console.log(`📅 Today’s schedule: ${numPosts} posts`);
-
-  for (let i = 0; i < numPosts; i++) {
-    await randomDelay(3 * 60 * 60 * 1000, 5 * 60 * 60 * 1000); // 3–5 hrs
-    console.log(`🚀 Preparing post ${i + 1} of ${numPosts}`);
-    await postVideoFromLocalOrApi();
+  // Fetch API posts once
+  const allApiPosts=[];
+  for(let acc of accounts){
+    const posts=await fetchMediaFromAccount(acc);
+    if(posts) allApiPosts.push(posts.post);
+    await sleep(5000);
   }
-}
 
-// ----------------------------- Startup ---------------------------------------
-(async () => {
-  try {
-    await ultraSafeLogin();
-    console.log("🚀 Making immediate startup post...");
-    await postVideoFromLocalOrApi(true);
-    await scheduler();
-  } catch (e) {
-    console.error("❌ Fatal error:", e.message);
-  }
+  // Immediate post
+  let localFile=getRandomLocalMedia();
+  if(localFile){await postLocalMedia(localFile);}
+  else if(allApiPosts.length>0){await postApiMedia(allApiPosts[0]);}
+  else{await postPlaceholder();}
+
+  // Schedule remaining posts
+  schedulePosts(allApiPosts);
 })();
-
-// ----------------------------- Keep alive ------------------------------------
-const app = express();
-app.get("/", (req, res) => res.send("✅ Instagram bot running"));
-app.listen(PORT, () =>
-  console.log(`🌐 Server running on port ${PORT}`)
-);

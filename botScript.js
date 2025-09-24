@@ -900,7 +900,8 @@ async function main() {
   // Keep the process alive for scheduled posts
   // The server is already running from the startServer() call above
 }
+
 main().catch((err) => {
   console.error("❌ Fatal error:", err);
   process.exit(1);
-}
+});

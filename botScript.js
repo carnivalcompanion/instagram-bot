@@ -20,8 +20,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Where to read local media from (MP4/MOV/AVI/MKV - videos only)
-const MEDIA_DIR = process.env.LOCAL_MEDIA_DIR || 
-    (process.env.RENDER ? path.join(os.tmpdir(), "localMedia") : path.join(__dirname, "localMedia"));
+const MEDIA_DIR = process.env.LOCAL_MEDIA_DIR || path.join(os.tmpdir(), "localMedia");
 
 // ----------------------------- .env / config ---------------------------------
 dotenv.config();
@@ -83,30 +82,16 @@ if (!USERNAME || !PASSWORD) {
 // FIXED: Render-compatible directory handling
 let ACTIVE_MEDIA_DIR;
 try {
-  // On Render, use the temp directory which is writable
-  if (process.env.RENDER) {
-    ACTIVE_MEDIA_DIR = path.join(os.tmpdir(), 'localMedia');
-    console.log(`🌐 Render environment detected, using temp directory: ${ACTIVE_MEDIA_DIR}`);
-  } else {
-    // Local development - use the original path
-    ACTIVE_MEDIA_DIR = MEDIA_DIR;
-    console.log(`💻 Local environment, using directory: ${ACTIVE_MEDIA_DIR}`);
-  }
-  
-  // Create directory if it doesn't exist
+  ACTIVE_MEDIA_DIR = MEDIA_DIR;
   if (!fs.existsSync(ACTIVE_MEDIA_DIR)) {
     console.log(`📁 Creating media directory: ${ACTIVE_MEDIA_DIR}`);
     fs.mkdirSync(ACTIVE_MEDIA_DIR, { recursive: true });
     console.log("✅ Media directory created successfully");
   }
-  
-  // Verify we can access the directory
   const files = fs.readdirSync(ACTIVE_MEDIA_DIR);
   console.log(`✅ Media directory accessible. Contains ${files.length} files:`, files);
-  
 } catch (error) {
   console.error("❌ Cannot create or access media directory:", error.message);
-  // Final fallback to current directory
   ACTIVE_MEDIA_DIR = __dirname;
   console.log(`📁 Falling back to: ${ACTIVE_MEDIA_DIR}`);
 }
@@ -353,8 +338,8 @@ async function loadSession() {
 async function ultraSafeLogin() {
   console.log("🔐 Ultra-safe login sequence initiated...");
   
-  // <-- CHANGED: login delay 10-20 seconds
-  const initialDelay = Math.random() * (20000 - 10000) + 10000; 
+  // Shortened login delay: 10-20 seconds
+  const initialDelay = Math.random() * 10000 + 10000;
   console.log(`⏳ Delaying login for ${Math.round(initialDelay/1000)} seconds...`);
   await new Promise(resolve => setTimeout(resolve, initialDelay));
   
@@ -373,13 +358,13 @@ async function ultraSafeLogin() {
     }
   }
 
-  await randomDelay(60000, 120000);
+  await randomDelay(1000, 2000);
   
   console.log("🔑 Performing fresh login...");
   await ig.account.login(USERNAME, PASSWORD);
   await saveSession();
   
-  await randomDelay(120000, 300000);
+  await randomDelay(1000, 2000);
   
   console.log("🔓 Login sequence completed safely");
 }

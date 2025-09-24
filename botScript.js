@@ -1,282 +1,166 @@
-// -------------------- Keep-alive server --------------------
-const express = require('express');
-const keepAliveApp = express();
-const keepAlivePort = process.env.PORT || 3000;
+// botScript.js
+import express from 'express';
+import 'dotenv/config';
+import { IgApiClient } from 'instagram-private-api';
+import axios from 'axios';
+import schedule from 'node-schedule';
+import fs from 'fs';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegPath from 'ffmpeg-static';
+import { fileURLToPath } from 'url';
 
-keepAliveApp.get('/', (req, res) => {
-  res.send('Node.js Bot is alive!');
-});
-
-keepAliveApp.listen(keepAlivePort, () => {
-  console.log(`Keep-alive server running on port ${keepAlivePort}`);
-});
-
-// -------------------- Imports & Config --------------------
-require("dotenv").config();
-const { IgApiClient } = require("instagram-private-api");
-const axios = require("axios");
-const schedule = require("node-schedule");
-const fs = require("fs");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const ffmpegPath = require("ffmpeg-static");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-console.log("🚀 Script starting...");
-console.log("Arguments:", process.argv);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const accounts = [
-  "aircommittee3", "illusionsmas", "reignmasband", "shineymas",
-  "Livcarnival", "fantasykarnival", "chocolatenationmas",
-  "tropicalfusionmas", "carnivalsaintlucia", "jabjabofficial",
-  "fuzionmas", "scorchmag", "yardmascarnival"
-];
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-const username = process.env.IG_USERNAME;
-const password = process.env.IG_PASSWORD;
-const rapidApiKey = process.env.RAPIDAPI_KEY;
-
-const localMediaDir = path.join(__dirname, "localMedia");
-const placeholderPath = path.join(__dirname, "placeholder.jpg");
-const sessionFile = "igSession.json";
-const historyFile = "postedHistory.json";
-
-if (!username || !password || !rapidApiKey) {
-  console.error("❌ Missing env variables. Set IG_USERNAME, IG_PASSWORD, RAPIDAPI_KEY.");
-  process.exit(1);
-}
-
-// -------------------- Instagram & History --------------------
 const ig = new IgApiClient();
-let postedHistory = [];
+ig.state.generateDevice(process.env.IG_USERNAME);
 
-if (fs.existsSync(historyFile)) {
-  try { postedHistory = JSON.parse(fs.readFileSync(historyFile, "utf8")); } 
-  catch { postedHistory = []; }
+const SESSION_FILE_PATH = path.join(__dirname, 'igSession.json');
+const TEMP_DIR = path.join(__dirname, 'temp');
+
+// Ensure temp directory exists
+if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR);
+
+function randomDelay(minSec, maxSec) {
+  return Math.floor(Math.random() * (maxSec - minSec + 1) + minSec) * 1000;
 }
 
-// -------------------- Hashtags & Captions --------------------
-const year = new Date().getFullYear();
-const hashtagPool = [
-  "#carnival","#soca","#caribbean","#trinidadcarnival","#carnaval","#fete",
-  "#socamusic","#carnivalcostume","#mas","#jouvert","#caribbeancarnival","#cropover",
-  "#playmas","#jabjab","#socavibes","#carnivalculture",`#carnival${year}`,`#soca${year}`
-];
-
-const captionTemplates = [
-  "Having fun at the carnival! 🎉","Another great day for soca and music! 🥳",
-  "Making memories that last forever! 🍹","Colors, feathers, and pure freedom! 🪶✨",
-  "This is how we do carnival in the islands 🌴🔥","Soca therapy in full effect! 🎶💃",
-  "Energy too high to calm down 🚀","Every beat of the drum tells a story 🥁❤️",
-  "Mas is not just a festival, it's a lifestyle 🌟","From sunrise to sunset, pure carnival spirit 🌞🌙",
-  "One love, one people, one carnival 💛💚❤️"
-];
-
-function getRandomHashtags(n = 5) {
-  const shuffled = [...hashtagPool].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, n).join(" ");
+async function humanDelay(minSec = 2, maxSec = 6) {
+  const delay = randomDelay(minSec, maxSec);
+  console.log(`⏳ Human-like delay: ${delay / 1000}s`);
+  return new Promise(resolve => setTimeout(resolve, delay));
 }
 
-function buildCaption(originalUser = null) {
-  const randomText = captionTemplates[Math.floor(Math.random() * captionTemplates.length)];
-  const hashtags = getRandomHashtags();
-  const allTags = `${hashtags} #CarnivalCompanion`.split(" ").filter((tag,i,self)=>tag&&self.indexOf(tag)===i).join(" ");
-  const credit = originalUser ? `\n\n📸 @${originalUser}` : "";
-  return `${randomText}\n\n${allTags}${credit}`;
-}
-
-// -------------------- Utility Functions --------------------
-function sleep(ms){return new Promise(resolve=>setTimeout(resolve,ms));}
-
-function getRandomLocalMedia() {
-  if (!fs.existsSync(localMediaDir)) return null;
-  const files = fs.readdirSync(localMediaDir).filter(f=>/\.(jpg|jpeg|png|mp4)$/i.test(f));
-  const usedFiles = new Set(postedHistory.filter(h=>h.source==="local").map(h=>h.id));
-  const unused = files.filter(f=>!usedFiles.has(f));
-  if (unused.length===0) {
-    postedHistory = postedHistory.filter(h=>h.source!=="local");
-    fs.writeFileSync(historyFile, JSON.stringify(postedHistory,null,2));
-    return path.join(localMediaDir, files[Math.floor(Math.random()*files.length)]);
+async function loginInstagram() {
+  try {
+    if (fs.existsSync(SESSION_FILE_PATH)) {
+      const savedSession = JSON.parse(fs.readFileSync(SESSION_FILE_PATH, 'utf-8'));
+      await ig.state.deserialize(savedSession);
+      console.log('✅ Session loaded successfully');
+    } else {
+      console.log('🔐 Forced fresh login initiated...');
+      await ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
+      fs.writeFileSync(SESSION_FILE_PATH, JSON.stringify(await ig.state.serialize()));
+      console.log('✅ Fresh login complete and session saved');
+    }
+  } catch (err) {
+    console.error('❌ Instagram login error:', err);
   }
-  return path.join(localMediaDir, unused[Math.floor(Math.random()*unused.length)]);
 }
 
-function getVideoDuration(filePath){
-  return new Promise((resolve,reject)=>{
-    ffmpeg.ffprobe(filePath,(err,meta)=>err?reject(err):resolve(meta.format.duration));
-  });
-}
-
-function extractVideoFrame(videoPath, outputPath){
-  return new Promise((resolve,reject)=>{
-    ffmpeg(videoPath).screenshots({
-      timestamps:["00:00:01"],
-      filename:path.basename(outputPath),
-      folder:path.dirname(outputPath),
-      size:"720x1280"
-    }).on('end',()=>resolve(outputPath))
-      .on('error',err=>reject(err));
-  });
-}
-
-async function login(){
-  ig.state.generateDevice(username);
-  if (fs.existsSync(sessionFile)) {
-    try{
-      await ig.state.deserialize(JSON.parse(fs.readFileSync(sessionFile)));
-      console.log("✅ Reused saved Instagram session");
-      return;
-    }catch{console.warn("⚠️ Failed to load session, logging in fresh...");}
-  }
-  console.log("🔑 Logging in fresh...");
-  await ig.account.login(username,password);
-  const serialized = await ig.state.serialize(); delete serialized.constants;
-  fs.writeFileSync(sessionFile,JSON.stringify(serialized,null,2));
-  console.log("🔒 New session saved");
-}
-
-async function refreshSession(){
-  try{
-    await ig.state.reset();
-    await login();
-    console.log("✅ Instagram session refreshed");
-  }catch(err){console.error("❌ Failed to refresh session:",err.message);}
-}
-
-// -------------------- Fetch API Media --------------------
-async function fetchMediaFromAccount(account, preferredType = null) {
-  try{
-    const normalized = account.toLowerCase().replace(/^\@/,"");
-    const response = await axios.get(`https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${normalized}`,{
-      headers: {"x-rapidapi-key":rapidApiKey,"x-rapidapi-host":"instagram-social-api.p.rapidapi.com"},
-      timeout:20000
+async function downloadMedia(url, dest) {
+  try {
+    const writer = fs.createWriteStream(dest);
+    const response = await axios({ url, method: 'GET', responseType: 'stream' });
+    response.data.pipe(writer);
+    return new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
     });
-    let items = Array.isArray(response.data?.data?.items)?response.data.data.items:
-                Array.isArray(response.data?.items)?response.data.items:
-                Array.isArray(response.data)?response.data:[];
-    if(!items.length) return null;
-    let post = items.find(p=>preferredType?p.media_type===preferredType:true)||items[0];
-    let mediaUrl = post.media_type===2?post.video_versions?.[0]?.url||post.videos?.[0]?.url||post.carousel_media?.[0]?.video_versions?.[0]?.url:
-                   post.media_type===1||post.media_type===8?post.image_versions2?.candidates?.[0]?.url||post.images?.standard_resolution?.url||post.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url:null;
-    if(!mediaUrl) return null;
-    return {post,mediaUrl};
-  }catch(err){
-    console.error(`❌ Error fetching @${account}:`,err.message);
-    return null;
+  } catch (err) {
+    console.error('❌ Failed to download media:', err);
+    throw err;
   }
 }
 
-// -------------------- Post Placeholder --------------------
-async function postPlaceholder(){
-  if(!fs.existsSync(placeholderPath)){console.error("❌ Placeholder missing"); return;}
-  try{
-    await login();
-    await ig.publish.photo({file:fs.readFileSync(placeholderPath),caption:buildCaption()});
-    console.log("✅ Placeholder posted");
-  }catch(err){console.error("❌ Failed to post placeholder:",err.message);}
+async function processVideo(inputPath, outputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .outputOptions('-c:v libx264', '-pix_fmt yuv420p', '-preset veryfast', '-movflags +faststart')
+      .on('end', () => resolve(outputPath))
+      .on('error', (err) => reject(err))
+      .save(outputPath);
+  });
 }
 
-// -------------------- Post Media --------------------
-async function postLocalMedia(localFile){
-  let tempFramePath=null;
-  try{
-    await refreshSession();
-    const buffer = fs.readFileSync(localFile);
-    if(localFile.endsWith(".mp4")){
-      const duration = await getVideoDuration(localFile);
-      if(duration<3||duration>60){console.warn(`⚠️ Invalid video duration ${duration}s`); return false;}
-      tempFramePath = path.join(__dirname,"temp_frame_local.jpg");
-      await extractVideoFrame(localFile,tempFramePath);
-      await ig.publish.video({video:buffer,coverImage:fs.readFileSync(tempFramePath),caption:buildCaption()});
-      console.log("✅ Local video posted!");
-    }else{
-      await ig.publish.photo({file:buffer,caption:buildCaption()});
-      console.log("✅ Local photo posted!");
+async function postToInstagram({ videoPath, imagePath, caption }) {
+  try {
+    await humanDelay(3, 8); // small human-like pause before posting
+    if (videoPath) {
+      await ig.publish.video({
+        video: fs.readFileSync(videoPath),
+        caption,
+      });
+      console.log('📤 Video posted successfully');
+    } else if (imagePath) {
+      await ig.publish.photo({
+        file: fs.readFileSync(imagePath),
+        caption,
+      });
+      console.log('📤 Image posted successfully');
+    } else {
+      console.log('⚠️ No media available to post');
     }
-    postedHistory.push({id:path.basename(localFile),timestamp:Date.now(),username:"local",media_type:localFile.endsWith(".mp4")?2:1,success:true,source:"local"});
-    if(postedHistory.length>1000) postedHistory=postedHistory.slice(-1000);
-    fs.writeFileSync(historyFile,JSON.stringify(postedHistory,null,2));
-    return true;
-  }catch(err){console.error("❌ Error posting local media:",err.message); return false;}
-  finally{if(tempFramePath&&fs.existsSync(tempFramePath)) fs.unlinkSync(tempFramePath);}
+  } catch (err) {
+    console.error('❌ Failed to post media:', err);
+  }
 }
 
-async function postApiMedia(post){
-  let tempVideoPath=null,tempFramePath=null;
-  try{
-    await refreshSession();
-    const account=post.user?.username;
-    const fetched=await fetchMediaFromAccount(account,post.media_type);
-    if(!fetched){console.log("⚠️ No valid API media"); return false;}
-    const {post:fresh,mediaUrl}=fetched;
-    if(fresh.media_type===2){
-      const res=await axios.get(mediaUrl,{responseType:"arraybuffer",timeout:30000});
-      tempVideoPath=path.join(__dirname,"temp_video.mp4"); fs.writeFileSync(tempVideoPath,res.data);
-      const duration=await getVideoDuration(tempVideoPath);
-      if(duration<3||duration>60){console.warn(`⚠️ Invalid API video ${duration}s`); return false;}
-      tempFramePath=path.join(__dirname,"temp_frame.jpg");
-      await extractVideoFrame(tempVideoPath,tempFramePath);
-      await ig.publish.video({video:fs.readFileSync(tempVideoPath),coverImage:fs.readFileSync(tempFramePath),caption:buildCaption(account)});
-      console.log("✅ API video posted!");
-    }else{
-      const res=await axios.get(mediaUrl,{responseType:"arraybuffer"});
-      await ig.publish.photo({file:Buffer.from(res.data),caption:buildCaption(account)});
-      console.log("✅ API image posted!");
+async function makePost() {
+  console.log('🚀 Making a scheduled post...');
+  let posted = false;
+
+  // 1️⃣ Try local media first
+  const localVideos = fs.readdirSync(path.join(__dirname, 'localMedia')).filter(f => f.endsWith('.mp4'));
+  if (localVideos.length) {
+    const videoFile = path.join(__dirname, 'localMedia', localVideos[0]);
+    const processedFile = path.join(TEMP_DIR, 'processed.mp4');
+    try {
+      await processVideo(videoFile, processedFile);
+      await postToInstagram({ videoPath: processedFile, caption: 'Your caption here' });
+      posted = true;
+    } catch (err) {
+      console.error('❌ Local video failed:', err);
     }
-    postedHistory.push({id:fresh.id,timestamp:Date.now(),username:account,media_type:fresh.media_type,success:true,source:"api"});
-    if(postedHistory.length>1000) postedHistory=postedHistory.slice(-1000);
-    fs.writeFileSync(historyFile,JSON.stringify(postedHistory,null,2));
-    return true;
-  }catch(err){console.error("❌ Error posting API media:",err.message); return false;}
-  finally{if(tempVideoPath&&fs.existsSync(tempVideoPath)) fs.unlinkSync(tempVideoPath); if(tempFramePath&&fs.existsSync(tempFramePath)) fs.unlinkSync(tempFramePath);}
+  }
+
+  // 2️⃣ Try API videos if local failed
+  if (!posted) {
+    try {
+      const apiVideoUrl = 'https://example.com/apiVideo.mp4'; // Replace with real API
+      const downloadPath = path.join(TEMP_DIR, 'apiVideo.mp4');
+      await downloadMedia(apiVideoUrl, downloadPath);
+      const processedFile = path.join(TEMP_DIR, 'processedApi.mp4');
+      await processVideo(downloadPath, processedFile);
+      await postToInstagram({ videoPath: processedFile, caption: 'API video post' });
+      posted = true;
+    } catch (err) {
+      console.error('❌ API video failed:', err);
+    }
+  }
+
+  // 3️⃣ Fallback placeholder image
+  if (!posted) {
+    const placeholderImage = path.join(__dirname, 'placeholder.jpg');
+    await postToInstagram({ imagePath: placeholderImage, caption: 'Placeholder post' });
+  }
 }
 
-// -------------------- Scheduler --------------------
-function getRandomTime(){
-  const hour=6+Math.floor(Math.random()*16); const minute=Math.floor(Math.random()*60);
-  const now=new Date(); const dt=new Date(now); dt.setHours(hour,minute,0,0);
-  if(dt<now) dt.setDate(dt.getDate()+1); return dt;
-}
-
-function schedulePosts(allApiPosts){
-  const totalPosts=Math.floor(Math.random()*(5-3+1))+3;
-  console.log(`📅 Scheduling ${totalPosts} posts today`);
-  for(let i=0;i<totalPosts;i++){
-    const dt=getRandomTime();
-    schedule.scheduleJob(dt,async ()=>{
-      let localFile=getRandomLocalMedia();
-      if(localFile){
-        const success=await postLocalMedia(localFile);
-        if(!success && allApiPosts.length>0) await postApiMedia(allApiPosts[Math.floor(Math.random()*allApiPosts.length)]);
-        else if(!success) await postPlaceholder();
-      }else if(allApiPosts.length>0){
-        const success=await postApiMedia(allApiPosts[Math.floor(Math.random()*allApiPosts.length)]);
-        if(!success) await postPlaceholder();
-      }else{
-        await postPlaceholder();
-      }
+async function startScheduler() {
+  // Schedule 1–3 posts per day with random times
+  const postsPerDay = Math.floor(Math.random() * 3) + 1; // 1 to 3 posts
+  console.log(`📅 Today’s plan: ${postsPerDay} post(s)`);
+  for (let i = 0; i < postsPerDay; i++) {
+    const hour = Math.floor(Math.random() * 12) + 8; // 8 AM - 8 PM
+    const minute = Math.floor(Math.random() * 60);
+    schedule.scheduleJob({ hour, minute }, async () => {
+      console.log(`⏰ Scheduled post triggered at ${hour}:${minute}`);
+      await makePost();
     });
   }
 }
 
-// -------------------- Main Runner --------------------
-(async ()=>{
-  await login();
+app.get('/', (req, res) => res.send('Instagram Bot Running 🚀'));
 
-  // Fetch API posts once
-  const allApiPosts=[];
-  for(let acc of accounts){
-    const posts=await fetchMediaFromAccount(acc);
-    if(posts) allApiPosts.push(posts.post);
-    await sleep(5000);
-  }
-
-  // Immediate post
-  let localFile=getRandomLocalMedia();
-  if(localFile){await postLocalMedia(localFile);}
-  else if(allApiPosts.length>0){await postApiMedia(allApiPosts[0]);}
-  else{await postPlaceholder();}
-
-  // Schedule remaining posts
-  schedulePosts(allApiPosts);
-})();
+app.listen(PORT, async () => {
+  console.log(`🌐 Server running on port ${PORT}`);
+  await loginInstagram();
+  await makePost(); // immediate post on startup
+  startScheduler();
+});

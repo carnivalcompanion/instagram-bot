@@ -24,3 +24,5 @@ cc.env
 lastApiResponse-*.json
 scheduledVideos.json
 
+credentials.json
+.env

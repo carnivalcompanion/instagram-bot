@@ -34,30 +34,62 @@ function log(emoji, message, data = null) {
 // Initial logging
 log("🚀", "Script starting with enhanced Google Drive integration...");
 
-// -------------------- Google Drive Configuration --------------------
-const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID;
-const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+// -------------------- Enhanced Google Drive Authentication --------------------
+async function authenticateGoogleDrive() {
+    try {
+        // Use service account authentication
+        const auth = new google.auth.GoogleAuth({
+            keyFile: './service-account-key.json',
+            scopes: ['https://www.googleapis.com/auth/drive.readonly']
+        });
+        
+        const drive = google.drive({ version: 'v3', auth });
+        log('✅', 'Google Drive authenticated with service account');
+        return drive;
+    } catch (error) {
+        log('❌', 'Google Drive authentication failed:', error.message);
+        return null;
+    }
+}
 
-// Initialize Google Drive client with service account
-let drive;
-try {
-  if (GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const auth = new google.auth.GoogleAuth({
-      credentials: JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON),
-      scopes: ['https://www.googleapis.com/auth/drive']
-    });
-    drive = google.drive({ version: 'v3', auth });
-    log("✅", "Google Drive authenticated with service account");
-  } else {
-    log("⚠️", "Google Service Account JSON not found, using API key fallback");
-    drive = google.drive({ 
-      version: 'v3', 
-      auth: process.env.GOOGLE_API_KEY 
-    });
-  }
-} catch (error) {
-  log("❌", "Google Drive authentication failed:", error.message);
-  drive = null;
+// Function to get videos from Google Drive
+async function getVideosFromDrive(drive, folderId = '1YLEwDRNzL3UmD9X35sEu4QSPrA50SXWS') {
+    try {
+        log('🔍', 'Searching Google Drive for videos...');
+        
+        const response = await drive.files.list({
+            q: `'${folderId}' in parents and (mimeType contains 'video/' or mimeType='application/octet-stream') and trashed=false`,
+            fields: 'files(id, name, mimeType, webContentLink)',
+            orderBy: 'createdTime desc'
+        });
+
+        const videos = response.data.files;
+        log('✅', `Found ${videos.length} videos in Google Drive`);
+        
+        return videos;
+    } catch (error) {
+        log('❌', 'Google Drive API error:', error.message);
+        return [];
+    }
+}
+
+async function getRandomVideo() {
+    log('1️⃣', 'Attempting Google Drive source...');
+    
+    // Authenticate with service account
+    const drive = await authenticateGoogleDrive();
+    
+    if (drive) {
+        const driveVideos = await getVideosFromDrive(drive);
+        if (driveVideos.length > 0) {
+            const randomVideo = driveVideos[Math.floor(Math.random() * driveVideos.length)];
+            log('✅', `Selected video from Drive: ${randomVideo.name}`);
+            return { source: 'drive', video: randomVideo };
+        }
+    }
+    
+    log('📭', 'No videos found in Google Drive, falling back to Instagram...');
+    return null;
 }
 
 // -------------------- Config --------------------
@@ -154,37 +186,54 @@ function saveGoogleDriveHistory() {
   }
 }
 
-// -------------------- Google Drive Functions --------------------
-async function getGoogleDriveVideos() {
-  if (!drive || !GOOGLE_DRIVE_FOLDER_ID) {
-    log("⚠️", "Google Drive not configured properly");
-    return [];
-  }
-
+// -------------------- Enhanced Google Drive Media Management --------------------
+async function getRandomGoogleDriveVideo() {
   try {
-    log("🔍", "Searching Google Drive for videos...");
+    log("🔍", "Getting random video from Google Drive...");
+    const drive = await authenticateGoogleDrive();
     
-    const response = await drive.files.list({
-      q: `'${GOOGLE_DRIVE_FOLDER_ID}' in parents and (mimeType contains 'video/' or mimeType contains 'application/vnd.google-apps.video') and trashed = false`,
-      fields: 'files(id, name, mimeType, webContentLink, webViewLink, size, createdTime)',
-      orderBy: 'createdTime desc',
-      pageSize: 100
+    if (!drive) {
+      log("⚠️", "Google Drive not available");
+      return null;
+    }
+
+    const driveVideos = await getVideosFromDrive(drive);
+    
+    if (driveVideos.length === 0) {
+      log("📭", "No videos found in Google Drive");
+      return null;
+    }
+
+    // Filter out videos that have been posted twice
+    const availableVideos = driveVideos.filter(video => {
+      const postCount = googleDriveHistory[video.id]?.postCount || 0;
+      return postCount < 2;
     });
 
-    const videoFiles = response.data.files.filter(file => 
-      file.mimeType.includes('video') && file.size > 100000
-    );
+    if (availableVideos.length === 0) {
+      log("📊", "All Google Drive videos have been posted twice");
+      return null;
+    }
 
-    log("✅", `Found ${videoFiles.length} videos in Google Drive`);
-    return videoFiles;
+    // Choose random video
+    const randomVideo = availableVideos[Math.floor(Math.random() * availableVideos.length)];
+    const postCount = googleDriveHistory[randomVideo.id]?.postCount || 0;
+    
+    log("🎲", `Selected random video: ${randomVideo.name} (Posted ${postCount} times before)`);
+    return randomVideo;
   } catch (error) {
-    log("❌", "Google Drive API error:", error.message);
-    return [];
+    log("❌", "Error getting random Google Drive video:", error.message);
+    return null;
   }
 }
 
 async function downloadFromGoogleDrive(fileId, fileName) {
   try {
+    const drive = await authenticateGoogleDrive();
+    if (!drive) {
+      throw new Error('Google Drive not available');
+    }
+
     const tempDir = path.join(__dirname, 'temp');
     if (!fs.existsSync(tempDir)) {
       fs.mkdirSync(tempDir, { recursive: true });
@@ -219,12 +268,13 @@ async function downloadFromGoogleDrive(fileId, fileName) {
 }
 
 async function deleteFromGoogleDrive(fileId, fileName) {
-  if (!drive) {
-    log("⚠️", "Google Drive not configured, cannot delete file");
-    return false;
-  }
-
   try {
+    const drive = await authenticateGoogleDrive();
+    if (!drive) {
+      log("⚠️", "Google Drive not configured, cannot delete file");
+      return false;
+    }
+
     log("🗑️", `Attempting to delete from Google Drive: ${fileName} (ID: ${fileId})`);
     await drive.files.delete({ fileId });
     log("✅", `Successfully deleted from Google Drive: ${fileName}`);
@@ -232,45 +282,6 @@ async function deleteFromGoogleDrive(fileId, fileName) {
   } catch (error) {
     log("❌", `Failed to delete from Google Drive: ${fileName}`, error.message);
     return false;
-  }
-}
-
-// -------------------- Enhanced Google Drive Media Management --------------------
-async function getRandomGoogleDriveVideo() {
-  if (!GOOGLE_DRIVE_FOLDER_ID) {
-    log("⚠️", "Google Drive folder ID not configured");
-    return null;
-  }
-
-  try {
-    log("🔍", "Getting random video from Google Drive...");
-    const driveVideos = await getGoogleDriveVideos();
-    
-    if (driveVideos.length === 0) {
-      log("📭", "No videos found in Google Drive");
-      return null;
-    }
-
-    // Filter out videos that have been posted twice
-    const availableVideos = driveVideos.filter(video => {
-      const postCount = googleDriveHistory[video.id]?.postCount || 0;
-      return postCount < 2;
-    });
-
-    if (availableVideos.length === 0) {
-      log("📊", "All Google Drive videos have been posted twice");
-      return null;
-    }
-
-    // Choose random video
-    const randomVideo = availableVideos[Math.floor(Math.random() * availableVideos.length)];
-    const postCount = googleDriveHistory[randomVideo.id]?.postCount || 0;
-    
-    log("🎲", `Selected random video: ${randomVideo.name} (Posted ${postCount} times before)`);
-    return randomVideo;
-  } catch (error) {
-    log("❌", "Error getting random Google Drive video:", error.message);
-    return null;
   }
 }
 

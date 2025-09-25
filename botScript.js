@@ -37,12 +37,23 @@ log("🚀", "Script starting with enhanced Google Drive integration...");
 // -------------------- Enhanced Google Drive Authentication --------------------
 async function authenticateGoogleDrive() {
     try {
-        // Use service account authentication
-        const auth = new google.auth.GoogleAuth({
-            keyFile: './service-account-key.json',
-            scopes: ['https://www.googleapis.com/auth/drive.readonly']
-        });
+        let auth;
         
+        if (process.env.GOOGLE_SERVICE_ACCOUNT) {
+            // Parse JSON from environment variable
+            const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+            auth = new google.auth.GoogleAuth({
+                credentials,
+                scopes: ['https://www.googleapis.com/auth/drive.readonly']
+            });
+        } else {
+            // Fallback to local file (for local dev only)
+            auth = new google.auth.GoogleAuth({
+                keyFile: path.join(__dirname, 'service-account-key.json'),
+                scopes: ['https://www.googleapis.com/auth/drive.readonly']
+            });
+        }
+
         const drive = google.drive({ version: 'v3', auth });
         log('✅', 'Google Drive authenticated with service account');
         return drive;
@@ -51,6 +62,7 @@ async function authenticateGoogleDrive() {
         return null;
     }
 }
+
 
 // Function to get videos from Google Drive
 async function getVideosFromDrive(drive, folderId = '1YLEwDRNzL3UmD9X35sEu4QSPrA50SXWS') {

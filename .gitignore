@@ -26,3 +26,4 @@ scheduledVideos.json
 
 credentials.json
 .env
+service-account-key.json

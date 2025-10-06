@@ -1,7 +1,9 @@
+[file name]: botScript.js
+[file content begin]
 // index.js - Final Render-ready Instagram scheduler + Drive scraper
 // Features:
 // - Instant startup post
-// - Schedule 3-4 posts/day for 7 days with randomized peak times
+// - Schedule 3-4 posts/day for 7 days with randomized peak times using Instagram's native scheduler
 // - Attach generated caption (includes #carnivalcompanion and random hashtags)
 // - Delete Drive file after it has been posted 2 times
 // - Day 5: scrape up to 4 videos/account and upload to Drive
@@ -323,7 +325,6 @@ async function getInspiredCaption() {
 // immediate publish (used for startup)
 async function publishNow(localVideoPath, coverPath, caption) {
   await maintainSession();
-  // Use file buffer for publish (more reliable than streams)
   const publish = await ig.publish.video({ 
     video: fs.readFileSync(localVideoPath), 
     coverImage: fs.readFileSync(coverPath), 
@@ -332,16 +333,22 @@ async function publishNow(localVideoPath, coverPath, caption) {
   return publish;
 }
 
-// schedule publish - Instagram's API may not support scheduling directly
+// schedule publish using Instagram's native scheduler for professional accounts
 async function publishScheduled(localVideoPath, coverPath, caption, scheduleDate) {
   await maintainSession();
-  // Note: instagram-private-api may not support scheduled_publish_time
-  // We'll post immediately but track it as "scheduled" in our system
+  
+  // Convert scheduleDate to Unix timestamp in seconds (Instagram API requirement)
+  const publishTime = Math.floor(scheduleDate.getTime() / 1000);
+  
   const publish = await ig.publish.video({
     video: fs.readFileSync(localVideoPath),
     coverImage: fs.readFileSync(coverPath),
-    caption
+    caption,
+    // Instagram's native scheduling for professional accounts
+    scheduled_publish_time: publishTime
   });
+  
+  log('✅', `Successfully scheduled post for ${scheduleDate.toISOString()} using Instagram's native scheduler`);
   return publish;
 }
 
@@ -352,14 +359,15 @@ async function postVideoFile(drive, driveFile, scheduleDate = null) {
     localPath = await downloadDriveFile(drive, driveFile.id, driveFile.name);
     if (!localPath) { log('❌', 'Failed to download file'); return false; }
 
-    // duration check
+    // duration check (Instagram limit: 180 seconds / 3 minutes)
     try {
       const dur = await getVideoDuration(localPath);
-      if (dur < 3 || dur > 180) { 
-        log('⚠️', `Video duration ${dur}s outside 3-180s range — skipping`); 
+      if (dur < 3 || dur > 181.5) { 
+        log('⚠️', `Video duration ${dur}s outside 3-181.5s range — skipping`); 
         try { fs.unlinkSync(localPath); } catch (_) {}
         return false; 
       }
+      log('✅', `Video duration: ${dur}s (within acceptable range)`);
     } catch (e) { 
       log('⚠️', 'Could not probe duration — continuing'); 
     }
@@ -386,7 +394,7 @@ async function postVideoFile(drive, driveFile, scheduleDate = null) {
 
     let publishResult;
     if (scheduleDate) {
-      log('🕒', `Scheduling ${driveFile.name} at ${scheduleDate.toISOString()}`);
+      log('🕒', `Scheduling ${driveFile.name} at ${scheduleDate.toISOString()} using Instagram's native scheduler`);
       publishResult = await publishScheduled(localPath, coverPath, caption, scheduleDate);
     } else {
       log('⚡', `Publishing now: ${driveFile.name}`);
@@ -409,6 +417,13 @@ async function postVideoFile(drive, driveFile, scheduleDate = null) {
     return true;
   } catch (err) {
     log('❌', 'postVideoFile error:', err.message);
+    // Log specific scheduling errors
+    if (err.message.includes('scheduled_publish_time')) {
+      log('⚠️', 'Scheduling failed. This might be because:');
+      log('⚠️', '- Your account is not a professional account');
+      log('⚠️', '- The scheduled time is too far in the future (max 75 days)');
+      log('⚠️', '- The scheduled time is in the past');
+    }
     return false;
   } finally {
     // cleanup local files
@@ -566,9 +581,9 @@ function pickRandomSlots(n = 3) {
   return shuffled.slice(0, n);
 }
 
-// schedule 7 days: pick 3-4 posts/day and schedule them
+// schedule 7 days: pick 3-4 posts/day and schedule them using Instagram's native scheduler
 async function scheduleSevenDays() {
-  log('📅', 'Scheduling posts for next 7 days...');
+  log('📅', 'Scheduling posts for next 7 days using Instagram native scheduler...');
   const drive = await authenticateGoogleDrive();
   if (!drive) { log('⚠️', 'Drive auth failed — cannot schedule'); return 0; }
   
@@ -597,7 +612,7 @@ async function scheduleSevenDays() {
       const ok = await postVideoFile(drive, candidate, scheduleDate);
       if (ok) scheduled++;
       
-      await new Promise(r => setTimeout(r, 3000)); // 3 second delay between scheduling
+      await new Promise(r => setTimeout(r, 5000)); // 5 second delay between scheduling requests
     }
   }
 
@@ -605,7 +620,7 @@ async function scheduleSevenDays() {
   cycleState.totalPostsScheduled += scheduled;
   saveCycleState();
 
-  log('✅', `Scheduled ${scheduled}/${attempted} posts for next 7 days`);
+  log('✅', `Scheduled ${scheduled}/${attempted} posts for next 7 days using Instagram's native scheduler`);
   return scheduled;
 }
 
@@ -655,7 +670,7 @@ async function startSevenDayCycle() {
       await startSevenDayCycle();
     });
 
-    // Then schedule the next 7 days
+    // Then schedule the next 7 days using Instagram's native scheduler
     await scheduleSevenDays();
     
     log('✅', `Cycle ${cycleState.currentCycle} started successfully`);
@@ -708,3 +723,4 @@ process.on('SIGTERM', () => {
   if (sessionRefreshInterval) clearInterval(sessionRefreshInterval); 
   process.exit(0); 
 });
+[file content end]

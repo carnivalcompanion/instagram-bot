@@ -355,8 +355,8 @@ async function postVideoFile(drive, driveFile, scheduleDate = null) {
     // duration check
     try {
       const dur = await getVideoDuration(localPath);
-      if (dur < 3 || dur > 60) { 
-        log('⚠️', `Video duration ${dur}s outside 3-60s range — skipping`); 
+      if (dur < 3 || dur > 180) { 
+        log('⚠️', `Video duration ${dur}s outside 3-180s range — skipping`); 
         try { fs.unlinkSync(localPath); } catch (_) {}
         return false; 
       }

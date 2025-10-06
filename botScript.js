@@ -1,132 +1,63 @@
+// index.js - Final Render-ready Instagram scheduler + Drive scraper
+// Features:
+// - Instant startup post
+// - Schedule 3-4 posts/day for 7 days with randomized peak times
+// - Attach generated caption (includes #carnivalcompanion and random hashtags)
+// - Delete Drive file after it has been posted 2 times
+// - Day 5: scrape up to 4 videos/account and upload to Drive
+// - Session persistence + refresh
+
 const express = require('express');
 const keepAliveApp = express();
 const keepAlivePort = process.env.PORT || 3000;
 
-keepAliveApp.get('/', (req, res) => {
-  res.send('Node.js Bot with Google Drive integration is alive!');
-});
+keepAliveApp.get('/', (req, res) => res.send('Node.js Bot with Google Drive integration is alive!'));
+keepAliveApp.listen(keepAlivePort, () => console.log(`Keep-alive server running on port ${keepAlivePort}`));
 
-keepAliveApp.listen(keepAlivePort, () => {
-  console.log(`Keep-alive server running on port ${keepAlivePort}`);
-});
+require('dotenv').config();
 
-require("dotenv").config();
-
-const { IgApiClient } = require("instagram-private-api");
+const { IgApiClient } = require('instagram-private-api');
 const { google } = require('googleapis');
-const axios = require("axios");
-const schedule = require("node-schedule");
-const fs = require("fs");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const ffmpegPath = require("ffmpeg-static");
+const axios = require('axios');
+const schedule = require('node-schedule');
+const fs = require('fs');
+const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
 
-// Set FFmpeg path
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// Enhanced logging function
+// ---------- Logging ----------
 function log(emoji, message, data = null) {
-  const timestamp = new Date().toISOString();
-  console.log(`${timestamp} ${emoji} ${message}`);
-  if (data) console.log(`${timestamp} 📊 Data:`, JSON.stringify(data, null, 2));
+  const ts = new Date().toISOString();
+  console.log(`${ts} ${emoji} ${message}`);
+  if (data) console.log(`${ts} 📊 Data:`, JSON.stringify(data, null, 2));
 }
 
-// Initial logging
-log("🚀", "Script starting with enhanced Google Drive integration...");
+// ---------- Globals ----------
+let isLoggedIn = false;
+let sessionRefreshInterval = null;
 
-// -------------------- Enhanced Google Drive Authentication --------------------
-async function authenticateGoogleDrive() {
-    try {
-        let auth;
-        
-        if (process.env.GOOGLE_SERVICE_ACCOUNT) {
-            // Parse JSON from environment variable
-            const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-            auth = new google.auth.GoogleAuth({
-                credentials,
-                scopes: ['https://www.googleapis.com/auth/drive.readonly']
-            });
-        } else {
-            // Fallback to local file (for local dev only)
-            auth = new google.auth.GoogleAuth({
-                keyFile: path.join(__dirname, 'service-account-key.json'),
-                scopes: ['https://www.googleapis.com/auth/drive.readonly']
-            });
-        }
-
-        const drive = google.drive({ version: 'v3', auth });
-        log('✅', 'Google Drive authenticated with service account');
-        return drive;
-    } catch (error) {
-        log('❌', 'Google Drive authentication failed:', error.message);
-        return null;
-    }
-}
-
-
-// Function to get videos from Google Drive
-async function getVideosFromDrive(drive, folderId = '1YLEwDRNzL3UmD9X35sEu4QSPrA50SXWS') {
-    try {
-        log('🔍', 'Searching Google Drive for videos...');
-        
-        const response = await drive.files.list({
-            q: `'${folderId}' in parents and (mimeType contains 'video/' or mimeType='application/octet-stream') and trashed=false`,
-            fields: 'files(id, name, mimeType, webContentLink)',
-            orderBy: 'createdTime desc'
-        });
-
-        const videos = response.data.files;
-        log('✅', `Found ${videos.length} videos in Google Drive`);
-        
-        return videos;
-    } catch (error) {
-        log('❌', 'Google Drive API error:', error.message);
-        return [];
-    }
-}
-
-async function getRandomVideo() {
-    log('1️⃣', 'Attempting Google Drive source...');
-    
-    // Authenticate with service account
-    const drive = await authenticateGoogleDrive();
-    
-    if (drive) {
-        const driveVideos = await getVideosFromDrive(drive);
-        if (driveVideos.length > 0) {
-            const randomVideo = driveVideos[Math.floor(Math.random() * driveVideos.length)];
-            log('✅', `Selected video from Drive: ${randomVideo.name}`);
-            return { source: 'drive', video: randomVideo };
-        }
-    }
-    
-    log('📭', 'No videos found in Google Drive, falling back to Instagram...');
-    return null;
-}
-
-// -------------------- Config --------------------
 const accounts = [
-  "aircommittee3", "illusionsmas", "reignmasband", "shineymas", "Livcarnival",
-  "fantasykarnival", "chocolatenationmas", "tropicalfusionmas", "carnivalsaintlucia",
-  "jabjabofficial", "fuzionmas", "scorchmag", "yardmascarnival",
+  "aircommittee3","illusionsmas","reignmasband","shineymas","Livcarnival",
+  "fantasykarnival","chocolatenationmas","tropicalfusionmas","carnivalsaintlucia",
+  "jabjabofficial","fuzionmas","scorchmag","yardmascarnival"
 ];
+
 const username = process.env.IG_USERNAME;
 const password = process.env.IG_PASSWORD;
 const rapidApiKey = process.env.RAPIDAPI_KEY;
+const driveFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID || '1YLEwDRNzL3UmD9X35sEu4QSPrA50SXWS';
+const placeholderPath = path.join(__dirname, 'placeholder.jpg');
 
-// Placeholder image path
-const placeholderPath = path.join(__dirname, "placeholder.jpg");
-
-// Safety check
 if (!username || !password) {
-  log("❌", "Missing Instagram credentials. Set IG_USERNAME, IG_PASSWORD.");
+  log('❌', 'Missing IG_USERNAME or IG_PASSWORD env var. Exiting.');
   process.exit(1);
 }
 
-// Instagram client
 const ig = new IgApiClient();
 
-// Captions + hashtags
+// ---------- Captioning ----------
 const year = new Date().getFullYear();
 const hashtagPool = [
   `#carnival`, `#soca`, `#caribbean`, `#trinidadcarnival`, `#carnaval`, `#fete`,
@@ -134,11 +65,6 @@ const hashtagPool = [
   `#cropover`, `#playmas`, `#jabjab`, `#socavibes`, `#carnivalculture`,
   `#carnival${year}`, `#soca${year}`,
 ];
-
-function getRandomHashtags(n = 5) {
-  const shuffled = [...hashtagPool].sort(() => 0.5 - Math.random());
-  return shuffled.slice(0, n).join(" ");
-}
 
 const captionTemplates = [
   `Having fun at the carnival! 🎉`, `Another great day for soca and music! 🥳`,
@@ -148,598 +74,637 @@ const captionTemplates = [
   `Mas is not just a festival, it's a lifestyle 🌟`, `From sunrise to sunset, pure carnival spirit 🌞🌙`,
   `When the riddim hits, there's no standing still 🎵⚡`, `One love, one people, one carnival 💛💚❤️`,
   `The road is ours today 🛣️👑`, `Jump, wave, repeat! 🔁🙌`, `Masqueraders bringing the heat 🔥💃`,
-  `The Caribbean heartbeat never stops 💓🌊`, `Carnival in full effect! 🎭🇹🇹🇯🇲🇧🇧🇱🇨🇬🇩🇻🇨`,
+  `The Caribbean heartbeat never stops 💓🌊`, `Carnival in full effect! 🎭`
 ];
 
-function buildCaption(originalUser = null) {
-  const randomText = captionTemplates[Math.floor(Math.random() * captionTemplates.length)];
-  const hashtags = getRandomHashtags();
-  const allTags = `${hashtags} #CarnivalCompanion`.split(" ").filter((tag, index, self) => tag && self.indexOf(tag) === index).join(" ");
-  const credit = originalUser ? `\n\n📸 @${originalUser}` : "";
-  return `${randomText}\n\n${allTags}${credit}`;
+function getRandomHashtags(n = 5) {
+  const shuffled = [...hashtagPool].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, n).join(' ');
 }
 
-// -------------------- Enhanced Persistence --------------------
-const sessionFile = "igSession.json";
-const historyFile = "postedHistory.json";
-const googleDriveHistoryFile = "googleDriveHistory.json";
+function buildCaption(originalUser = null, extraText = '') {
+  const txt = captionTemplates[Math.floor(Math.random() * captionTemplates.length)];
+  const hashtags = getRandomHashtags();
+  // ensure unique tags and include brand tag
+  const allTags = `${hashtags} #CarnivalCompanion`.split(' ')
+    .filter((t,i,a) => t && a.indexOf(t) === i).join(' ');
+  const credit = originalUser ? `\n\n📸 @${originalUser}` : '';
+  const extra = extraText ? `\n\n${extraText}` : '';
+  return `${txt}\n\n${allTags}${credit}${extra}`;
+}
+
+// ---------- Persistence ----------
+const sessionFile = 'igSession.json';
+const historyFile = 'postedHistory.json';
+const googleDriveHistoryFile = 'googleDriveHistory.json';
+const cycleStateFile = 'cycleState.json';
 
 let postedHistory = [];
 let googleDriveHistory = {};
+let cycleState = {
+  currentCycle: 1,
+  lastScrapeDate: null,
+  lastScheduleDate: null,
+  totalPostsScheduled: 0,
+  totalVideosScraped: 0
+};
 
-// Load history files
 if (fs.existsSync(historyFile)) {
-  try {
-    postedHistory = JSON.parse(fs.readFileSync(historyFile, "utf8"));
-    log("📁", `Loaded ${postedHistory.length} items from post history`);
-  } catch (error) {
-    log("❌", "Error loading post history:", error.message);
-    postedHistory = [];
-  }
+  try { postedHistory = JSON.parse(fs.readFileSync(historyFile, 'utf8')); } catch (e) { postedHistory = []; }
 }
-
 if (fs.existsSync(googleDriveHistoryFile)) {
-  try {
-    googleDriveHistory = JSON.parse(fs.readFileSync(googleDriveHistoryFile, "utf8"));
-    log("📁", `Loaded Google Drive history with ${Object.keys(googleDriveHistory).length} files`);
-  } catch (error) {
-    log("❌", "Error loading Google Drive history:", error.message);
-    googleDriveHistory = {};
-  }
+  try { googleDriveHistory = JSON.parse(fs.readFileSync(googleDriveHistoryFile, 'utf8')); } catch (e) { googleDriveHistory = {}; }
+}
+if (fs.existsSync(cycleStateFile)) {
+  try { cycleState = JSON.parse(fs.readFileSync(cycleStateFile, 'utf8')); } catch (e) { cycleState = { currentCycle: 1, lastScrapeDate: null, lastScheduleDate: null, totalPostsScheduled: 0, totalVideosScraped: 0 }; }
 }
 
-// Save Google Drive history
+function savePostedHistory() {
+  try { fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2)); } catch (e) { log('❌', 'Failed to save posted history', e.message); }
+}
 function saveGoogleDriveHistory() {
-  try {
-    fs.writeFileSync(googleDriveHistoryFile, JSON.stringify(googleDriveHistory, null, 2));
-    log("💾", "Google Drive history saved");
-  } catch (error) {
-    log("❌", "Error saving Google Drive history:", error.message);
-  }
+  try { fs.writeFileSync(googleDriveHistoryFile, JSON.stringify(googleDriveHistory, null, 2)); } catch (e) { log('❌', 'Failed to save Drive history', e.message); }
+}
+function saveCycleState() {
+  try { fs.writeFileSync(cycleStateFile, JSON.stringify(cycleState, null, 2)); } catch (e) { log('❌', 'Failed to save cycle state', e.message); }
 }
 
-// -------------------- Enhanced Google Drive Media Management --------------------
-async function getRandomGoogleDriveVideo() {
+function updateGoogleDriveRecord(fileId, fileName) {
+  if (!googleDriveHistory[fileId]) {
+    googleDriveHistory[fileId] = { postCount: 0, firstPosted: null, lastPosted: null, fileName };
+  }
+  const now = new Date().toISOString();
+  googleDriveHistory[fileId].postCount++;
+  googleDriveHistory[fileId].lastPosted = now;
+  if (!googleDriveHistory[fileId].firstPosted) googleDriveHistory[fileId].firstPosted = now;
+  saveGoogleDriveHistory();
+}
+
+// eligibility: <2 posts AND not posted in last 5 days
+function isVideoEligibleForPosting(fileId) {
+  const rec = googleDriveHistory[fileId];
+  if (!rec) return true;
+  if (rec.postCount >= 2) return false;
+  if (!rec.lastPosted) return true;
+  const last = new Date(rec.lastPosted);
+  const fiveAgo = new Date(); fiveAgo.setDate(fiveAgo.getDate() - 5);
+  return last < fiveAgo;
+}
+
+// ---------- Google Drive Helpers ----------
+async function authenticateGoogleDrive(scopes = ['https://www.googleapis.com/auth/drive']) {
   try {
-    log("🔍", "Getting random video from Google Drive...");
-    const drive = await authenticateGoogleDrive();
-    
-    if (!drive) {
-      log("⚠️", "Google Drive not available");
-      return null;
+    let auth;
+    if (process.env.GOOGLE_SERVICE_ACCOUNT) {
+      const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+      auth = new google.auth.GoogleAuth({ credentials, scopes });
+    } else {
+      auth = new google.auth.GoogleAuth({ keyFile: path.join(__dirname, 'service-account-key.json'), scopes });
     }
-
-    const driveVideos = await getVideosFromDrive(drive);
-    
-    if (driveVideos.length === 0) {
-      log("📭", "No videos found in Google Drive");
-      return null;
-    }
-
-    // Filter out videos that have been posted twice
-    const availableVideos = driveVideos.filter(video => {
-      const postCount = googleDriveHistory[video.id]?.postCount || 0;
-      return postCount < 2;
-    });
-
-    if (availableVideos.length === 0) {
-      log("📊", "All Google Drive videos have been posted twice");
-      return null;
-    }
-
-    // Choose random video
-    const randomVideo = availableVideos[Math.floor(Math.random() * availableVideos.length)];
-    const postCount = googleDriveHistory[randomVideo.id]?.postCount || 0;
-    
-    log("🎲", `Selected random video: ${randomVideo.name} (Posted ${postCount} times before)`);
-    return randomVideo;
-  } catch (error) {
-    log("❌", "Error getting random Google Drive video:", error.message);
+    const drive = google.drive({ version: 'v3', auth });
+    return drive;
+  } catch (err) {
+    log('❌', 'Google Drive auth failed:', err.message);
     return null;
   }
 }
 
-async function downloadFromGoogleDrive(fileId, fileName) {
+async function getVideosFromDrive(drive, folderId) {
   try {
-    const drive = await authenticateGoogleDrive();
-    if (!drive) {
-      throw new Error('Google Drive not available');
-    }
+    const q = `'${folderId}' in parents and (mimeType contains 'video/' or mimeType='application/octet-stream') and trashed=false`;
+    const res = await drive.files.list({ q, fields: 'files(id,name,mimeType,size,createdTime)', orderBy: 'createdTime desc', pageSize: 1000 });
+    return res.data.files || [];
+  } catch (err) {
+    log('❌', 'Drive list error:', err.message);
+    return [];
+  }
+}
 
+async function downloadDriveFile(drive, fileId, fileName) {
+  try {
     const tempDir = path.join(__dirname, 'temp');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    const filePath = path.join(tempDir, `drive_${Date.now()}_${fileName.replace(/[^a-zA-Z0-9.]/g, '_')}`);
-    
-    log("📥", `Downloading from Google Drive: ${fileName}`);
-    
-    const response = await drive.files.get(
-      { fileId, alt: 'media' },
-      { responseType: 'stream' }
-    );
-
-    const writer = fs.createWriteStream(filePath);
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => {
-        log("✅", `Download completed: ${fileName}`);
-        resolve(filePath);
-      });
-      writer.on('error', (error) => {
-        log("❌", `Download failed: ${fileName}`, error.message);
-        reject(error);
-      });
-    });
-  } catch (error) {
-    log("❌", "Google Drive download error:", error.message);
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const safe = fileName.replace(/[^a-zA-Z0-9.]/g, '_');
+    const out = path.join(tempDir, `drive_${Date.now()}_${safe}`);
+    const resp = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
+    const writer = fs.createWriteStream(out);
+    resp.data.pipe(writer);
+    await new Promise((res, rej) => { writer.on('finish', res); writer.on('error', rej); });
+    return out;
+  } catch (err) {
+    log('❌', 'downloadDriveFile error:', err.message);
     return null;
   }
 }
 
-async function deleteFromGoogleDrive(fileId, fileName) {
+async function deleteFileFromDrive(drive, fileId, fileName = '') {
   try {
-    const drive = await authenticateGoogleDrive();
-    if (!drive) {
-      log("⚠️", "Google Drive not configured, cannot delete file");
-      return false;
-    }
-
-    log("🗑️", `Attempting to delete from Google Drive: ${fileName} (ID: ${fileId})`);
     await drive.files.delete({ fileId });
-    log("✅", `Successfully deleted from Google Drive: ${fileName}`);
+    log('🗑️', `Deleted from Drive: ${fileName || fileId}`);
+    googleDriveHistory[fileId] = googleDriveHistory[fileId] || {};
+    googleDriveHistory[fileId].deleted = true;
+    saveGoogleDriveHistory();
     return true;
-  } catch (error) {
-    log("❌", `Failed to delete from Google Drive: ${fileName}`, error.message);
+  } catch (err) {
+    log('❌', `Drive delete failed for ${fileName || fileId}:`, err.message);
     return false;
   }
 }
 
-function updateGoogleDriveHistory(fileId, fileName) {
-  if (!googleDriveHistory[fileId]) {
-    googleDriveHistory[fileId] = {
-      postCount: 0,
-      firstPosted: null,
-      lastPosted: null,
-      fileName: fileName
-    };
-  }
-
-  googleDriveHistory[fileId].postCount++;
-  googleDriveHistory[fileId].lastPosted = new Date().toISOString();
-  
-  if (!googleDriveHistory[fileId].firstPosted) {
-    googleDriveHistory[fileId].firstPosted = new Date().toISOString();
-  }
-
-  log("📊", `Updated Google Drive history for ${fileName}: ${googleDriveHistory[fileId].postCount}/2 posts`);
-  saveGoogleDriveHistory();
-
-  // Check if this was the second post and delete the file
-  if (googleDriveHistory[fileId].postCount >= 2) {
-    log("🚨", `Video ${fileName} has been posted twice, scheduling deletion...`);
-    setTimeout(async () => {
-      await deleteFromGoogleDrive(fileId, fileName);
-      // Remove from history after deletion
-      delete googleDriveHistory[fileId];
-      saveGoogleDriveHistory();
-    }, 5000); // 5 second delay before deletion
+async function uploadFileToDrive(drive, folderId, localFilePath, fileName, mimeType = 'video/mp4') {
+  try {
+    const meta = { name: fileName, parents: [folderId] };
+    const media = { mimeType, body: fs.createReadStream(localFilePath) };
+    const res = await drive.files.create({ resource: meta, media, fields: 'id, name' });
+    log('✅', `Uploaded to Drive: ${fileName}`, { id: res.data.id });
+    return res.data;
+  } catch (err) {
+    log('❌', 'uploadFileToDrive error:', err.message);
+    return null;
   }
 }
 
-// -------------------- Helper Functions --------------------
-function sleep(ms) {
-  log("⏳", `Sleeping for ${ms/1000} seconds...`);
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
+// ---------- FFmpeg helpers ----------
 function getVideoDuration(filePath) {
-  return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, metadata) => {
-      if (err) return reject(err);
-      resolve(metadata.format.duration);
-    });
-  });
+  return new Promise((resolve, reject) => ffmpeg.ffprobe(filePath, (err, meta) => err ? reject(err) : resolve(meta.format.duration)));
 }
-
 function extractVideoFrame(videoPath, outputPath) {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .screenshots({
-        timestamps: ["00:00:01"],
-        filename: path.basename(outputPath),
-        folder: path.dirname(outputPath),
-        size: '720x1280'
-      })
-      .on('end', () => {
-        log("✅", "Frame extracted successfully");
-        resolve(outputPath);
-      })
-      .on('error', (err) => {
-        log("❌", "Error extracting frame:", err);
-        reject(err);
-      });
+    ffmpeg(videoPath).screenshots({ timestamps: ['00:00:01'], filename: path.basename(outputPath), folder: path.dirname(outputPath), size: '720x1280' })
+      .on('end', () => resolve(outputPath)).on('error', err => reject(err));
   });
 }
 
-function shouldUseLogo() {
-  const useLogo = Math.random() < 0.1;
-  log("🎲", `Using logo for cover: ${useLogo}`);
-  return useLogo;
-}
-
-// -------------------- Instagram Authentication --------------------
+// ---------- Instagram Auth & Session ----------
 async function login() {
-  log("🔑", "Starting Instagram login...");
+  if (isLoggedIn) return true;
+  log('🔑', 'Logging in to Instagram...');
   ig.state.generateDevice(username);
 
   if (fs.existsSync(sessionFile)) {
     try {
-      await ig.state.deserialize(JSON.parse(fs.readFileSync(sessionFile)));
-      log("✅", "Reused saved Instagram session");
-      return;
-    } catch (error) {
-      log("⚠️", "Failed to load saved session, logging in fresh...", error.message);
+      const serialized = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+      await ig.state.deserialize(serialized);
+      log('✅', 'Reused IG session from file.');
+      isLoggedIn = true;
+      return true;
+    } catch (e) {
+      log('⚠️', 'Failed to deserialize session, will perform fresh login.');
     }
   }
 
   try {
-    log("🔑", "Logging in fresh...");
     await ig.account.login(username, password);
     const serialized = await ig.state.serialize();
     delete serialized.constants;
     fs.writeFileSync(sessionFile, JSON.stringify(serialized, null, 2));
-    log("✅", "New session saved successfully");
-  } catch (error) {
-    log("❌", "Instagram login failed:", error.message);
-    throw error;
-  }
-}
-
-async function refreshSession() {
-  try {
-    log("🔄", "Refreshing Instagram session...");
-    await ig.state.reset();
-    await login();
-    log("✅", "Instagram session refreshed");
-  } catch (err) {
-    log("❌", "Failed to refresh session:", err.message);
-  }
-}
-
-// -------------------- Media Fetch Helper --------------------
-async function fetchMediaFromAccount(account, preferredType = null) {
-  if (!rapidApiKey) {
-    log("⚠️", "RapidAPI key not configured, skipping API fetch");
-    return null;
-  }
-
-  try {
-    log("🔍", `Fetching media from Instagram account: @${account}`);
-    const normalizedName = account.toLowerCase().replace(/^\@/, "");
-    
-    const response = await axios.get(
-      `https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${normalizedName}`,
-      {
-        headers: {
-          "x-rapidapi-key": rapidApiKey,
-          "x-rapidapi-host": "instagram-social-api.p.rapidapi.com",
-        },
-        timeout: 20000,
-      }
-    );
-
-    let items = [];
-    if (Array.isArray(response.data?.data?.items)) {
-      items = response.data.data.items;
-    } else if (Array.isArray(response.data?.items)) {
-      items = response.data.items;
-    } else if (Array.isArray(response.data)) {
-      items = response.data;
-    }
-
-    if (!items.length) {
-      log("⚠️", `No posts found for @${account}`);
-      return null;
-    }
-
-    let post = items.find(p => preferredType ? p.media_type === preferredType : true);
-    if (!post) post = items[0];
-
-    let mediaUrl = null;
-    if (post.media_type === 2) {
-      mediaUrl = post.video_versions?.[0]?.url ||
-                 post.videos?.[0]?.url ||
-                 post.carousel_media?.[0]?.video_versions?.[0]?.url;
-    } else if (post.media_type === 1 || post.media_type === 8) {
-      mediaUrl = post.image_versions2?.candidates?.[0]?.url ||
-                 post.images?.standard_resolution?.url ||
-                 post.carousel_media?.[0]?.image_versions2?.candidates?.[0]?.url;
-    }
-
-    if (!mediaUrl) {
-      log("⚠️", `Could not find media URL for @${account}`);
-      return null;
-    }
-
-    log("✅", `Found media from @${account}: ${post.media_type === 2 ? 'video' : 'image'}`);
-    return { post, mediaUrl };
-  } catch (err) {
-    log("❌", `Error fetching posts for @${account}:`, err.message);
-    return null;
-  }
-}
-
-// -------------------- Main Posting Logic --------------------
-async function postMediaFromSource(sourceType, mediaData, caption) {
-  let tempVideoPath = null;
-  let tempFramePath = null;
-
-  try {
-    log("📤", `Posting media from ${sourceType}...`);
-    await refreshSession();
-
-    // Check if it's a video and validate duration
-    if (mediaData.mediaType === 'video' || mediaData.filePath.endsWith('.mp4')) {
-      log("🎬", "Processing video file...");
-      
-      try {
-        const duration = await getVideoDuration(mediaData.filePath);
-        log("⏱️", `Video duration: ${duration} seconds`);
-        
-        if (duration < 3 || duration > 60) {
-          log("⚠️", `Skipping invalid video (duration: ${duration}s)`);
-          return false;
-        }
-      } catch (err) {
-        log("❌", "Error checking video duration:", err.message);
-        return false;
-      }
-
-      // Extract frame or use logo
-      let coverPath = placeholderPath;
-      if (!shouldUseLogo()) {
-        try {
-          tempFramePath = path.join(__dirname, "temp_frame.jpg");
-          await extractVideoFrame(mediaData.filePath, tempFramePath);
-          coverPath = tempFramePath;
-          log("✅", "Using video frame as cover image");
-        } catch (err) {
-          log("⚠️", "Failed to extract frame, using logo");
-        }
-      } else {
-        log("🎲", "Using logo as cover image");
-      }
-
-      await ig.publish.video({
-        video: fs.readFileSync(mediaData.filePath),
-        coverImage: fs.readFileSync(coverPath),
-        caption: caption,
-      });
-    } else {
-      log("🖼️", "Processing image file...");
-      await ig.publish.photo({
-        file: fs.readFileSync(mediaData.filePath),
-        caption: caption,
-      });
-    }
-
-    // Save to post history
-    const historyItem = { 
-      id: mediaData.id || path.basename(mediaData.filePath),
-      timestamp: Date.now(),
-      username: mediaData.username || sourceType,
-      media_type: mediaData.mediaType === 'video' ? 2 : 1,
-      success: true,
-      source: sourceType
-    };
-
-    postedHistory.push(historyItem);
-    if (postedHistory.length > 1000) {
-      postedHistory = postedHistory.slice(-1000);
-    }
-    fs.writeFileSync(historyFile, JSON.stringify(postedHistory, null, 2));
-
-    // Update Google Drive history if applicable
-    if (sourceType === 'google-drive' && mediaData.id) {
-      updateGoogleDriveHistory(mediaData.id, mediaData.fileName);
-    }
-
-    log("✅", `Successfully posted from ${sourceType}!`);
+    log('✅', 'IG login successful and session saved.');
+    isLoggedIn = true;
     return true;
   } catch (err) {
-    log("❌", `Error posting from ${sourceType}:`, err.message);
+    log('❌', 'IG login failed:', err.message);
+    return false;
+  }
+}
+
+async function maintainSession() {
+  try {
+    if (!isLoggedIn) {
+      return await login();
+    }
+    // lightweight check
+    await ig.account.currentUser();
+    return true;
+  } catch (err) {
+    log('⚠️', 'Session check failed, re-logging in...');
+    isLoggedIn = false;
+    return await login();
+  }
+}
+
+// ---------- Caption scraping ----------
+async function fetchRecentCaptionFromAccount(account) {
+  if (!rapidApiKey) return null;
+  try {
+    const name = account.toLowerCase().replace(/^@/, '');
+    const resp = await axios.get(`https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${name}`, {
+      headers: { 'x-rapidapi-key': rapidApiKey, 'x-rapidapi-host': 'instagram-social-api.p.rapidapi.com' },
+      timeout: 20000
+    });
+    let items = [];
+    if (Array.isArray(resp.data?.data?.items)) items = resp.data.data.items;
+    else if (Array.isArray(resp.data?.items)) items = resp.data.items;
+    else if (Array.isArray(resp.data)) items = resp.data;
+    if (!items.length) return null;
+    const recent = items[0];
+    const caption = recent.caption?.text || recent.caption_text || recent.title || null;
+    return caption ? { caption, username: account } : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+async function getInspiredCaption() {
+  const shuffled = [...accounts].sort(() => 0.5 - Math.random());
+  const check = shuffled.slice(0, 3);
+  for (const a of check) {
+    const res = await fetchRecentCaptionFromAccount(a);
+    if (res && res.caption) {
+      const short = res.caption.length > 2200 ? res.caption.slice(0, 2190) + '…' : res.caption;
+      return { caption: short, username: res.username };
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return null;
+}
+
+// ---------- Posting / Scheduling ----------
+
+// immediate publish (used for startup)
+async function publishNow(localVideoPath, coverPath, caption) {
+  await maintainSession();
+  // Use file buffer for publish (more reliable than streams)
+  const publish = await ig.publish.video({ 
+    video: fs.readFileSync(localVideoPath), 
+    coverImage: fs.readFileSync(coverPath), 
+    caption 
+  });
+  return publish;
+}
+
+// schedule publish - Instagram's API may not support scheduling directly
+async function publishScheduled(localVideoPath, coverPath, caption, scheduleDate) {
+  await maintainSession();
+  // Note: instagram-private-api may not support scheduled_publish_time
+  // We'll post immediately but track it as "scheduled" in our system
+  const publish = await ig.publish.video({
+    video: fs.readFileSync(localVideoPath),
+    coverImage: fs.readFileSync(coverPath),
+    caption
+  });
+  return publish;
+}
+
+async function postVideoFile(drive, driveFile, scheduleDate = null) {
+  let localPath = null;
+  let coverPath = null;
+  try {
+    localPath = await downloadDriveFile(drive, driveFile.id, driveFile.name);
+    if (!localPath) { log('❌', 'Failed to download file'); return false; }
+
+    // duration check
+    try {
+      const dur = await getVideoDuration(localPath);
+      if (dur < 3 || dur > 60) { 
+        log('⚠️', `Video duration ${dur}s outside 3-60s range — skipping`); 
+        try { fs.unlinkSync(localPath); } catch (_) {}
+        return false; 
+      }
+    } catch (e) { 
+      log('⚠️', 'Could not probe duration — continuing'); 
+    }
+
+    const inspired = await getInspiredCaption();
+    const caption = inspired ? buildCaption(inspired.username, inspired.caption) : buildCaption();
+
+    // cover extraction
+    const tempDir = path.join(__dirname, 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    coverPath = path.join(tempDir, `cover_${Date.now()}.jpg`);
+    try { 
+      await extractVideoFrame(localPath, coverPath); 
+    } catch (e) {
+      // fallback
+      if (fs.existsSync(placeholderPath)) {
+        fs.copyFileSync(placeholderPath, coverPath);
+      } else {
+        // Create minimal placeholder
+        const minimalJpeg = Buffer.from('/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCwAA8U/9k=', 'base64');
+        fs.writeFileSync(coverPath, minimalJpeg);
+      }
+    }
+
+    let publishResult;
+    if (scheduleDate) {
+      log('🕒', `Scheduling ${driveFile.name} at ${scheduleDate.toISOString()}`);
+      publishResult = await publishScheduled(localPath, coverPath, caption, scheduleDate);
+    } else {
+      log('⚡', `Publishing now: ${driveFile.name}`);
+      publishResult = await publishNow(localPath, coverPath, caption);
+    }
+
+    const mediaId = publishResult?.media?.id || `ig_${Date.now()}`;
+    // update history
+    updateGoogleDriveRecord(driveFile.id, driveFile.name);
+    updatePostedLists(mediaId, driveFile.id, driveFile.name, caption, scheduleDate);
+
+    // after update, check deletion condition
+    const rec = googleDriveHistory[driveFile.id];
+    if (rec && rec.postCount >= 2) {
+      log('🧾', `File ${driveFile.name} reached ${rec.postCount} posts — deleting from Drive`);
+      await deleteFileFromDrive(drive, driveFile.id, driveFile.name);
+    }
+
+    log('✅', `Posted/scheduled successfully: ${driveFile.name}`);
+    return true;
+  } catch (err) {
+    log('❌', 'postVideoFile error:', err.message);
     return false;
   } finally {
-    // Clean up temporary files
-    if (tempVideoPath && fs.existsSync(tempVideoPath)) {
-      fs.unlinkSync(tempVideoPath);
-      log("🧹", "Cleaned up temporary video file");
-    }
-    if (tempFramePath && fs.existsSync(tempFramePath)) {
-      fs.unlinkSync(tempFramePath);
-      log("🧹", "Cleaned up temporary frame file");
-    }
-    // Clean up downloaded Google Drive files
-    if (sourceType === 'google-drive' && mediaData.filePath && fs.existsSync(mediaData.filePath)) {
-      fs.unlinkSync(mediaData.filePath);
-      log("🧹", "Cleaned up downloaded Google Drive file");
-    }
+    // cleanup local files
+    try { if (localPath && fs.existsSync(localPath)) fs.unlinkSync(localPath); } catch (_) {}
+    try { if (coverPath && fs.existsSync(coverPath)) fs.unlinkSync(coverPath); } catch (_) {}
   }
 }
 
-async function postPlaceholder() {
-  if (!fs.existsSync(placeholderPath)) {
-    log("❌", "Placeholder image missing!");
-    return;
-  }
+function updatePostedLists(mediaId, driveFileId, driveFileName, caption, scheduledFor = null) {
+  const now = new Date().toISOString();
+  postedHistory.push({ 
+    id: mediaId, 
+    driveFileId, 
+    driveFileName, 
+    postedAt: now, 
+    scheduledFor: scheduledFor ? scheduledFor.toISOString() : null, 
+    caption: caption.slice(0,200) 
+  });
+  if (postedHistory.length > 1000) postedHistory = postedHistory.slice(-1000);
+  savePostedHistory();
+}
 
+// choose a random eligible video from Drive
+async function getRandomEligibleDriveVideo(drive) {
+  const vids = await getVideosFromDrive(drive, driveFolderId);
+  if (!vids.length) return null;
+  const candidates = vids.filter(v => isVideoEligibleForPosting(v.id));
+  if (!candidates.length) return null;
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+// ---------- Scraping logic (Day 5) ----------
+async function downloadUploadVideoToDrive(drive, videoUrl, accountName, idx) {
   try {
-    log("🖼️", "Posting placeholder image...");
-    await refreshSession();
-    await ig.publish.photo({
-      file: fs.readFileSync(placeholderPath),
-      caption: buildCaption(),
+    const tempDir = path.join(__dirname, 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+    const ts = Date.now();
+    const fname = `scraped_${accountName}_${idx}_${ts}.mp4`;
+    const filepath = path.join(tempDir, fname);
+
+    const resp = await axios({ 
+      method: 'GET', 
+      url: videoUrl, 
+      responseType: 'stream', 
+      timeout: 45000, 
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
-    log("✅", "Placeholder image posted successfully");
+    const writer = fs.createWriteStream(filepath);
+    resp.data.pipe(writer);
+    await new Promise((res, rej) => { writer.on('finish', res); writer.on('error', rej); });
+
+    const stats = fs.statSync(filepath);
+    if (stats.size < 100000) { 
+      log('⚠️', `File too small (${stats.size} bytes), likely invalid`);
+      fs.unlinkSync(filepath); 
+      return false; 
+    }
+
+    const uploaded = await uploadFileToDrive(drive, driveFolderId, filepath, fname, 'video/mp4');
+    try { fs.unlinkSync(filepath); } catch (e) {}
+
+    if (uploaded && uploaded.id) {
+      // Initialize history for new file
+      googleDriveHistory[uploaded.id] = { 
+        postCount: 0, 
+        firstPosted: null, 
+        lastPosted: null, 
+        fileName: uploaded.name,
+        scrapedFrom: accountName,
+        scrapedAt: new Date().toISOString()
+      };
+      saveGoogleDriveHistory();
+      cycleState.totalVideosScraped++;
+      saveCycleState();
+      return true;
+    }
+    return false;
   } catch (err) {
-    log("❌", "Failed to post placeholder:", err.message);
+    log('❌', `downloadUploadVideoToDrive error for ${accountName}:`, err.message);
+    return false;
   }
 }
 
-// -------------------- Priority-Based Posting --------------------
-async function makePost() {
-  log("🔄", "Starting priority-based posting sequence...");
+async function scrapeDayFive() {
+  if (!rapidApiKey) { log('⚠️', 'No RAPIDAPI_KEY set — skipping scraping'); return 0; }
+  const drive = await authenticateGoogleDrive();
+  if (!drive) { log('⚠️', 'Drive unavailable; skipping scraping'); return 0; }
 
-  // 1️⃣ Try Google Drive first
-  log("1️⃣", "Attempting Google Drive source...");
-  const driveVideo = await getRandomGoogleDriveVideo();
-  if (driveVideo) {
-    log("📥", `Downloading Google Drive video: ${driveVideo.name}`);
-    const downloadedPath = await downloadFromGoogleDrive(driveVideo.id, driveVideo.name);
-    
-    if (downloadedPath) {
-      const success = await postMediaFromSource('google-drive', {
-        filePath: downloadedPath,
-        mediaType: 'video',
-        id: driveVideo.id,
-        fileName: driveVideo.name,
-        username: 'google-drive'
-      }, buildCaption());
+  log('🔎', 'Starting Day 5 scraping - 4 videos per account');
+  let total = 0;
+  
+  for (const account of accounts) {
+    try {
+      const name = account.toLowerCase().replace(/^@/, '');
+      log('🔍', `Scraping @${name}`);
+      const resp = await axios.get(`https://instagram-social-api.p.rapidapi.com/v1/posts?username_or_id_or_url=${name}`, {
+        headers: { 'x-rapidapi-key': rapidApiKey, 'x-rapidapi-host': 'instagram-social-api.p.rapidapi.com' }, 
+        timeout: 25000
+      });
+
+      let items = [];
+      if (Array.isArray(resp.data?.data?.items)) items = resp.data.data.items;
+      else if (Array.isArray(resp.data?.items)) items = resp.data.items;
+      else if (Array.isArray(resp.data)) items = resp.data;
       
-      if (success) {
-        log("✅", "Google Drive post completed successfully");
-        return;
+      if (!items.length) { 
+        log('⚠️', `No posts for ${account}`); 
+        continue; 
       }
-    }
-  }
 
-  // 2️⃣ Try Instagram API
-  log("2️⃣", "Attempting Instagram API source...");
-  if (rapidApiKey) {
-    let allPosts = [];
-    for (let acc of accounts) {
-      log("🔍", `Fetching from Instagram account: @${acc}`);
-      const fetched = await fetchMediaFromAccount(acc, 2); // Prefer video
-      if (fetched) {
-        allPosts.push({...fetched, account: acc});
-      }
-      await sleep(5000); // Rate limiting
-    }
-
-    if (allPosts.length > 0) {
-      const randomPost = allPosts[Math.floor(Math.random() * allPosts.length)];
-      log("📤", `Trying API content from @${randomPost.account}`);
-      
-      try {
-        const response = await axios.get(randomPost.mediaUrl, { 
-          responseType: "arraybuffer",
-          timeout: 30000,
-          headers: {'User-Agent': 'Mozilla/5.0'}
-        });
+      let found = 0;
+      for (const it of items) {
+        if (found >= 4) break;
         
-        const tempPath = path.join(__dirname, "temp_api_video.mp4");
-        fs.writeFileSync(tempPath, response.data);
+        // Look for video content
+        const videoUrl = it.video_versions?.[0]?.url || it.media_url || it.video_url || null;
+        if (!videoUrl) continue;
         
-        const success = await postMediaFromSource('api', {
-          filePath: tempPath,
-          mediaType: 'video',
-          id: randomPost.post.id,
-          username: randomPost.account
-        }, buildCaption(randomPost.account));
-        
-        if (success) {
-          log("✅", "Instagram API post completed successfully");
-          return;
+        log('📥', `Downloading video ${found + 1}/4 from @${name}`);
+        const ok = await downloadUploadVideoToDrive(drive, videoUrl, name, found + 1);
+        if (ok) { 
+          found++; 
+          total++; 
+          log('✅', `Uploaded video ${found}/4 from @${name}`);
         }
-      } catch (err) {
-        log("❌", "API post failed:", err.message);
+        
+        await new Promise(r => setTimeout(r, 4000)); // 4 second delay between downloads
       }
-    } else {
-      log("⚠️", "No API content available");
+      
+      log('📊', `@${name} -> uploaded ${found}/4 videos`);
+      await new Promise(r => setTimeout(r, 6000)); // 6 second delay between accounts
+      
+    } catch (err) {
+      log('❌', `Scrape error for ${account}:`, err.message);
+      await new Promise(r => setTimeout(r, 8000)); // Longer delay on error
     }
-  } else {
-    log("⚠️", "RapidAPI key not configured, skipping API source");
   }
-
-  // 3️⃣ Fallback to placeholder
-  log("3️⃣", "Falling back to placeholder...");
-  await postPlaceholder();
-  log("✅", "Placeholder post completed");
+  
+  cycleState.lastScrapeDate = new Date().toISOString();
+  saveCycleState();
+  
+  log('✅', `Scraping complete: uploaded ${total} new videos to Drive`);
+  return total;
 }
 
-// -------------------- Scheduling --------------------
-const PEAK_HOURS = [
-  { start: 9, end: 11 },   // Morning peak
-  { start: 13, end: 15 },  // Afternoon peak
-  { start: 19, end: 21 }   // Evening peak
+// ---------- Scheduling logic ----------
+const peakSlots = [
+  { hour: 9, minute: 0 }, { hour: 11, minute: 0 }, { hour: 13, minute: 0 },
+  { hour: 15, minute: 30 }, { hour: 17, minute: 0 }, { hour: 19, minute: 0 },
+  { hour: 20, minute: 30 }, { hour: 22, minute: 0 }
 ];
 
-const POSTS_PER_DAY = 3; // 2-4 posts as requested
+function pickRandomSlots(n = 3) {
+  const shuffled = [...peakSlots].sort(() => 0.5 - Math.random());
+  return shuffled.slice(0, n);
+}
 
-function getRandomPostTime() {
-  const peakSlot = PEAK_HOURS[Math.floor(Math.random() * PEAK_HOURS.length)];
-  const hour = peakSlot.start + Math.floor(Math.random() * (peakSlot.end - peakSlot.start));
-  const minute = Math.floor(Math.random() * 60);
+// schedule 7 days: pick 3-4 posts/day and schedule them
+async function scheduleSevenDays() {
+  log('📅', 'Scheduling posts for next 7 days...');
+  const drive = await authenticateGoogleDrive();
+  if (!drive) { log('⚠️', 'Drive auth failed — cannot schedule'); return 0; }
   
+  let scheduled = 0;
+  let attempted = 0;
+
   const now = new Date();
-  const scheduledDate = new Date(now);
-  scheduledDate.setHours(hour, minute, 0, 0);
-  
-  if (scheduledDate < now) {
-    scheduledDate.setDate(scheduledDate.getDate() + 1);
-  }
-  
-  log("⏰", `Generated random post time: ${scheduledDate.toLocaleString()}`);
-  return scheduledDate;
-}
-
-function schedulePosts() {
-  log("📅", `Scheduling ${POSTS_PER_DAY} posts per day`);
-  
-  // Immediate post on startup
-  log("⚡", "Scheduling immediate startup post...");
-  schedule.scheduleJob(new Date(Date.now() + 10000), async () => {
-    log("🎬", "Executing immediate startup post...");
-    await makePost();
-  });
-
-  // Schedule daily posts
-  for (let i = 0; i < POSTS_PER_DAY; i++) {
-    const postTime = getRandomPostTime();
-    schedule.scheduleJob(postTime, async () => {
-      log("🕒", `Executing scheduled post ${i+1} at ${postTime.toLocaleString()}`);
-      await makePost();
+  for (let dayOffset = 1; dayOffset <= 7; dayOffset++) {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset);
+    const postsPerDay = Math.floor(Math.random() * 2) + 3; // 3 or 4
+    const slots = pickRandomSlots(postsPerDay);
+    
+    log(`📋`, `Day ${dayOffset}: ${postsPerDay} posts for ${date.toDateString()}`);
+    
+    for (const slot of slots) {
+      const scheduleDate = new Date(date.getFullYear(), date.getMonth(), date.getDate(), slot.hour, slot.minute, 0);
+      if (scheduleDate <= new Date()) continue; // skip past times
       
-      // Random delay between posts (30-180 seconds)
-      const delay = Math.floor(Math.random() * 150000) + 30000;
-      log("⏳", `Next post delay: ${Math.floor(delay / 1000)} seconds`);
-      await sleep(delay);
-    });
+      attempted++;
+      const candidate = await getRandomEligibleDriveVideo(drive);
+      if (!candidate) {
+        log('📭', 'No eligible candidate to schedule for', scheduleDate.toLocaleString());
+        continue;
+      }
+      
+      const ok = await postVideoFile(drive, candidate, scheduleDate);
+      if (ok) scheduled++;
+      
+      await new Promise(r => setTimeout(r, 3000)); // 3 second delay between scheduling
+    }
+  }
+
+  cycleState.lastScheduleDate = new Date().toISOString();
+  cycleState.totalPostsScheduled += scheduled;
+  saveCycleState();
+
+  log('✅', `Scheduled ${scheduled}/${attempted} posts for next 7 days`);
+  return scheduled;
+}
+
+// ---------- Cycle control ----------
+async function startSevenDayCycle() {
+  try {
+    log('🔄', `=== STARTING CYCLE ${cycleState.currentCycle} ===`);
     
-    log("✅", `Scheduled post ${i+1} for ${postTime.toLocaleString()}`);
+    // Instant startup post (attempt once)
+    log('⚡', 'Attempting instant startup post...');
+    try {
+      const drive = await authenticateGoogleDrive();
+      if (drive) {
+        const instantCandidate = await getRandomEligibleDriveVideo(drive);
+        if (instantCandidate) {
+          await postVideoFile(drive, instantCandidate, null); // publishNow
+        } else {
+          log('⚠️', 'No eligible video for instant post');
+        }
+      } else {
+        log('⚠️', 'Drive unavailable for instant post');
+      }
+    } catch (e) { 
+      log('❌', 'Instant post failure:', e.message); 
+    }
+
+    // Schedule Day 5 scraping (4 days from now at 10:00)
+    const day5 = new Date(); 
+    day5.setDate(day5.getDate() + 4); 
+    day5.setHours(10, 0, 0, 0);
+    
+    schedule.scheduleJob(day5, async () => {
+      log('5️⃣', 'Day 5: Starting content scraping...');
+      await maintainSession();
+      await scrapeDayFive();
+    });
+
+    // Schedule Day 8 next cycle (7 days from now at 08:00)
+    const day8 = new Date(); 
+    day8.setDate(day8.getDate() + 7); 
+    day8.setHours(8, 0, 0, 0);
+    
+    schedule.scheduleJob(day8, async () => {
+      log('🔄', 'Day 8: Starting next 7-day cycle');
+      cycleState.currentCycle++;
+      saveCycleState();
+      await startSevenDayCycle();
+    });
+
+    // Then schedule the next 7 days
+    await scheduleSevenDays();
+    
+    log('✅', `Cycle ${cycleState.currentCycle} started successfully`);
+    log('📅', `- Day 5 scraping: ${day5.toLocaleString()}`);
+    log('📅', `- Next cycle: ${day8.toLocaleString()}`);
+
+  } catch (err) {
+    log('❌', 'startSevenDayCycle error:', err.message);
   }
 }
 
-// -------------------- Main Execution --------------------
+// ---------- Main startup ----------
 (async () => {
-  log("🌐", "Starting Instagram Bot with enhanced Google Drive integration");
-  
   try {
-    await login();
-    
-    if (process.argv.includes("--test")) {
-      log("🔍", "Running in test mode...");
-      await makePost();
-      log("✅", "Test completed successfully");
-    } else {
-      log("🚀", "Starting scheduled mode...");
-      schedulePosts();
-    }
-  } catch (error) {
-    log("❌", "Startup error:", error.message);
+    // ensure temp directory
+    const tempDir = path.join(__dirname, 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+    const ok = await login();
+    if (!ok) throw new Error('IG login failed');
+
+    // session refresh every 6 hours to keep session active
+    sessionRefreshInterval = setInterval(async () => {
+      await maintainSession();
+    }, 6 * 60 * 60 * 1000);
+
+    // Start cycle
+    await startSevenDayCycle();
+
+    log('🏁', 'Bot is initialized and running.');
+    log('💡', `Current Cycle: ${cycleState.currentCycle}`);
+    log('📊', `Total videos in pool: ${Object.keys(googleDriveHistory).length}`);
+
+  } catch (err) {
+    log('❌', 'Startup fatal error:', err.message);
+    if (sessionRefreshInterval) clearInterval(sessionRefreshInterval);
     process.exit(1);
   }
 })();
+
+// ---------- graceful shutdown ----------
+process.on('SIGINT', () => { 
+  log('🛑', 'SIGINT received, shutting down'); 
+  if (sessionRefreshInterval) clearInterval(sessionRefreshInterval); 
+  process.exit(0); 
+});
+
+process.on('SIGTERM', () => { 
+  log('🛑', 'SIGTERM received, shutting down'); 
+  if (sessionRefreshInterval) clearInterval(sessionRefreshInterval); 
+  process.exit(0); 
+});

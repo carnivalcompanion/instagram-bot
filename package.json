@@ -4,8 +4,7 @@
   "description": "Instagram bot for posting carnival content",
   "main": "botScript.js",
   "scripts": {
-    "start": "node botScript.js",
-    "install": "echo 'Installation complete'"
+    "start": "node botScript.js"
   },
   "dependencies": {
     "dotenv": "^16.6.1",
@@ -18,6 +17,6 @@
     "googleapis": "^126.0.1"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }
